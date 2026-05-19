@@ -175,7 +175,7 @@ public class K8sPlatform implements ResourcePlatform {
               .endConfigMap()
               .endVolume()
               .addNewImagePullSecret()
-              .withName("ecr-secret")
+              .withName("ghcr-secret")
               .endImagePullSecret()
               .endSpec()
               .build();

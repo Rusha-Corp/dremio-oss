@@ -175,6 +175,8 @@ import com.dremio.resource.QueryCancelTool;
 import com.dremio.resource.ResourceAllocator;
 import com.dremio.resource.RuleBasedEngineSelector;
 import com.dremio.resource.basic.BasicResourceAllocator;
+import com.dremio.resource.elastic.ElasticResourceAllocator;
+import com.dremio.resource.elastic.ResourcePlatformProvider;
 import com.dremio.sabot.exec.CancelQueryContext;
 import com.dremio.sabot.exec.CoordinatorHeapClawBackStrategy;
 import com.dremio.sabot.exec.ExecToCoordTunnelCreator;
@@ -1223,11 +1225,27 @@ public class DACDaemonModule implements DACModule {
           ProvisioningService.class, createProvisioningService(registry, isCoordinator, isMaster));
     }
 
-    registry.bind(
-        ResourceAllocator.class,
-        new BasicResourceAllocator(
-            registry.provider(ClusterCoordinator.class),
-            registry.provider(GroupResourceInformation.class)));
+    // Check if elastic scaling is enabled
+    boolean elasticEnabled = config.getBoolean(DremioConfig.ELASTIC_ENABLED);
+
+    if (elasticEnabled) {
+      // Use ElasticResourceAllocator for elastic scaling
+      registry.bind(
+          ResourceAllocator.class,
+          new ElasticResourceAllocator(
+              registry.provider(ClusterCoordinator.class),
+              registry.provider(GroupResourceInformation.class),
+              new ResourcePlatformProvider(config, registry.provider(ClusterCoordinator.class)),
+              config));
+    } else {
+      // Use BasicResourceAllocator for standard operation
+      registry.bind(
+          ResourceAllocator.class,
+          new BasicResourceAllocator(
+              registry.provider(ClusterCoordinator.class),
+              registry.provider(GroupResourceInformation.class)));
+    }
+
     if (isCoordinator) {
 
       registry.bind(ExecutorSelectorFactory.class, new ExecutorSelectorFactoryImpl());

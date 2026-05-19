@@ -216,6 +216,10 @@
       <groupId>com.dremio.services</groupId>
       <artifactId>dremio-services-execselector</artifactId>
     </dependency>
+    <dependency>
+      <groupId>com.dremio.services</groupId>
+      <artifactId>dremio-services-resourcescheduler</artifactId>
+    </dependency>
     <!-- required for dremio-services-coordinator:tests -->
     <dependency>
       <groupId>org.apache.curator</groupId>

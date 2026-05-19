@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dremio-coordinator
+  namespace: dremio
+spec:
+  clusterIP: None  # Headless service for pod DNS
+  ports:
+    - port: 9047
+      targetPort: 9047
+      name: web
+    - port: 45678
+      targetPort: 45678
+      name: rpc
+    - port: 2181
+      targetPort: 2181
+      name: zk
+  selector:
+    app: dremio
+    role: coordinator

@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dremio-coordinator-0
+  namespace: dremio
+  labels:
+    app: dremio
+    role: coordinator
+spec:
+  containers:
+    - name: coordinator
+      image: ghcr.io/rusha-corp/dremio-oss:coordinator-26.0.5-elastic
+      ports:
+        - containerPort: 9047
+          name: web
+        - containerPort: 45678
+          name: rpc
+        - containerPort: 2181
+          name: zk
+      volumeMounts:
+        - name: dremio-config
+          mountPath: /opt/dremio/conf
+        - name: dremio-data
+          mountPath: /opt/dremio/data
+      env:
+        - name: DREMIO_JAVA_OPTS
+          value: "-Xmx4g -Xms4g"
+      resources:
+        requests:
+          memory: "4Gi"
+          cpu: "2"
+        limits:
+          memory: "4Gi"
+          cpu: "2"
+  volumes:
+    - name: dremio-config
+      configMap:
+        name: dremio-config
+    - name: dremio-data
+      emptyDir: {}
+  serviceAccountName: dremio-elastic
+  imagePullSecrets:
+    - name: ghcr-secret
+  restartPolicy: Always

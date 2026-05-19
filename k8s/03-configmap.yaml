@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dremio-config
+  namespace: dremio
+data:
+  dremio.conf: |
+    paths: {
+      local: "/opt/dremio/data"
+      dist: "file:///opt/dremio/data/dist"
+    }
+    services: {
+      coordinator.enabled: true,
+      coordinator.master.enabled: true,
+      coordinator.master.embedded-zookeeper.enabled: true,
+      coordinator.web.port: 9047,
+      executor.enabled: false,
+      executor.elastic.enabled: true,
+      executor.elastic.platform: "kubernetes",
+      executor.elastic.min_executors: 0,
+      executor.elastic.max_executors: 4,
+      executor.elastic.kubernetes.namespace: "dremio",
+      executor.elastic.kubernetes.image: "ghcr.io/rusha-corp/dremio-oss:executor-26.0.5-elastic-v3",
+      executor.elastic.kubernetes.zookeeper_address: "dremio-coordinator.dremio.svc.cluster.local:2181"
+    }

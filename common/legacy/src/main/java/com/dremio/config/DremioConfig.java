@@ -100,6 +100,45 @@ public class DremioConfig extends NestedConfig {
   public static final String CACHE_FS_PATH_LIST = "services.executor.cache.path.fs";
   public static final String CACHE_ENABLED = "services.executor.cache.enabled";
   public static final String CACHE_DB_QUOTA = "services.executor.cache.pctquota.db";
+
+  // Elastic scaling configuration
+  public static final String ELASTIC_ENABLED = "services.executor.elastic.enabled";
+  public static final String ELASTIC_PLATFORM = "services.executor.elastic.platform";
+  public static final String ELASTIC_MIN_EXECUTORS = "services.executor.elastic.min_executors";
+  public static final String ELASTIC_MAX_EXECUTORS = "services.executor.elastic.max_executors";
+  public static final String ELASTIC_SCALE_TIMEOUT =
+      "services.executor.elastic.scale_timeout_minutes";
+  public static final String ELASTIC_EXECUTOR_MEMORY_GB =
+      "services.executor.elastic.executor_memory_gb";
+  public static final String ELASTIC_NODE_MEMORY_GB = "services.executor.elastic.node_memory_gb";
+  public static final String ELASTIC_K8S_NAMESPACE =
+      "services.executor.elastic.kubernetes.namespace";
+  public static final String ELASTIC_K8S_POD_TEMPLATE =
+      "services.executor.elastic.kubernetes.pod_template";
+  public static final String ELASTIC_K8S_IMAGE =
+      "services.executor.elastic.kubernetes.image";
+  public static final String ELASTIC_K8S_ZOOKEEPER_ADDRESS =
+      "services.executor.elastic.kubernetes.zookeeper_address";
+  public static final String ELASTIC_AWS_EC2_INSTANCE_TYPE =
+      "services.executor.elastic.aws-ec2.instance_type";
+  public static final String ELASTIC_AWS_EC2_AMI_ID =
+      "services.executor.elastic.aws-ec2.ami_id";
+  public static final String ELASTIC_AWS_EC2_REGION =
+      "services.executor.elastic.aws-ec2.region";
+  public static final String ELASTIC_GCP_INSTANCE_TYPE =
+      "services.executor.elastic.gcp-compute.instance_type";
+  public static final String ELASTIC_GCP_ZONE =
+      "services.executor.elastic.gcp-compute.zone";
+  public static final String ELASTIC_GCP_PROJECT_ID =
+      "services.executor.elastic.gcp-compute.project_id";
+  public static final String ELASTIC_AZURE_VM_INSTANCE_TYPE =
+      "services.executor.elastic.azure-vm.instance_type";
+  public static final String ELASTIC_AZURE_LOCATION =
+      "services.executor.elastic.azure-vm.location";
+  public static final String ELASTIC_SMALL_QUERY_THRESHOLD =
+      "services.executor.elastic.small_query_threshold";
+  public static final String ELASTIC_MEDIUM_QUERY_THRESHOLD =
+      "services.executor.elastic.medium_query_threshold";
   public static final String CACHE_FS_QUOTA_LIST = "services.executor.cache.pctquota.fs";
   public static final String CACHE_FS_ENSURE_FREE_SPACE_LIST =
       "services.executor.cache.ensurefreespace.fs";

@@ -37,3 +37,9 @@ jetbrains_config.js
 .cproject
 CTestTestfile.cmake
 .python-version
+
+# Local dev scripts and overrides
+dev-dremio.sh
+run-test.sh
+/dremio-reference.conf
+plan/

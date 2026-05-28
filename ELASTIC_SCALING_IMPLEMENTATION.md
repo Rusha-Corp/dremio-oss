@@ -2,7 +2,9 @@
 
 ## Overview
 
-This implementation adds elastic (auto-scaling) executor support to Dremio, allowing the coordinator to dynamically provision and de-provision executor pods based on query workload. When a query arrives that requires more executor capacity than currently available, the system automatically scales up by creating new executor pods, waits for them to register with the coordinator, and then proceeds with query allocation. When capacity exceeds demand, executors can be scaled down.
+This implementation adds elastic (auto-scaling) executor support to Dremio, allowing the coordinator to dynamically scale executor pods based on query workload. When a query arrives that requires more executor capacity than currently available, the system publishes a demand metric, KEDA scales the executor Deployment up, the allocator waits for new executors to register with the coordinator, and then proceeds with query allocation. When capacity exceeds demand and queries complete, the demand metric drops and KEDA scales the Deployment down after a cooldown period.
+
+**Node provisioning is handled by the Kubernetes Cluster Autoscaler.** This implementation only signals demand via metrics — KEDA manages pod replica counts.
 
 The feature is **disabled by default** and does not alter existing Dremio behavior when turned off.
 
@@ -27,10 +29,10 @@ The feature is **disabled by default** and does not alter existing Dremio behavi
                     │                                         │
                     │  1. Get query cost from plan              │
                     │  2. Calculate required executors          │
-                    │  3. Check current available executors     │
-                    │  4. Scale up if needed via ResourcePlatform│
-                    │  5. Wait for executors to register        │
-                    │  6. Delegate to BasicResourceAllocator     │
+                    │  3. Register demand in active-jobs map   │
+                    │  4. Wait for executors to register        │
+                    │  5. Delegate to BasicResourceAllocator     │
+                    │  6. On ResourceSet.close() → remove demand│
                     └──────────────┬──────────────────────────┘
                                    │
                     ┌──────────────▼──────────────────────────┐
@@ -43,28 +45,32 @@ The feature is **disabled by default** and does not alter existing Dremio behavi
                     │                                         │
                     │  Also calculates:                        │
                     │  - Scale delta (required - current)      │
-                    │  - Required nodes (memory-based packing)  │
                     └─────────────────────────────────────────┘
                                    │
                     ┌──────────────▼──────────────────────────┐
                     │       ResourcePlatformProvider           │
-                    │  (creates platform from config)          │
+                    │  (creates K8sPlatform from config, cached) │
                     │                                         │
-                    │  Config: elastic.platform =              │
-                    │    "kubernetes" → K8sPlatform            │
-                    │    "aws-ec2"    → AwsEc2Platform         │
-                    │    "gcp-compute"→ GcpComputePlatform     │
-                    │    "azure-vm"   → AzureVmPlatform        │
-                    │    (disabled)   → NoOpResourcePlatform    │
+                    │  Config: elastic.enabled = true          │
+                    │    → K8sPlatform (read-only)             │
+                    │    (disabled)  → NoOpResourcePlatform     │
                     └──────────────┬──────────────────────────┘
                                    │
-              ┌────────────────────┬────────┬────────┬─────────┐
-              ▼                    ▼        ▼        ▼         ▼
-        ┌──────────┐  ┌────────┐ ┌──────┐ ┌─────┐ ┌─────────┐
-        │K8sPlatform│  │AWS EC2 │ │GCP   │ │Azure│ │  NoOp    │
-        │(fabric8)  │  │        │ │Compute│ │ VM  │ │(disabled)│
-        │  FULL     │  │ STUB   │ │ STUB  │ │STUB │ │          │
-        └──────────┘  └────────┘ └──────┘ └─────┘ └─────────┘
+              ┌────────────────────┐
+              ▼                    ▼
+        ┌──────────┐        ┌─────────┐
+        │K8sPlatform│        │  NoOp    │
+        │(read-only)│        │(disabled)│
+        │pod counts │        │          │
+        │+ ZK state │        └─────────┘
+        └─────┬──────┘
+              │
+        ┌─────▼──────────┐
+        │  Micrometer     │
+        │  Gauges         │
+        │  desired.small  │──────▶ metrics-exporter ──▶ KEDA ScaledObject
+        │  desired.large  │──────▶ metrics-exporter ──▶ KEDA ScaledObject
+        └────────────────┘
 ```
 
 ---
@@ -79,9 +85,8 @@ Platform-agnostic admission logic that determines how many executors a query nee
 
 | Method | Description |
 |--------|-------------|
-| `calculateRequiredExecutors(planCost, avgExecutorMemoryBytes)` | Returns 1, 2, or 3 executors based on cost thresholds |
+| `calculateRequiredExecutors(planCost)` | Returns 1, 2, or 3 executors based on cost thresholds |
 | `calculateScaleDelta(requiredExecutors, currentExecutors)` | Returns how many executors to add (0 if sufficient) |
-| `calculateRequiredNodes(executors, nodeMemoryBytes, executorMemoryBytes)` | Calculates node count based on memory packing |
 
 **Cost Thresholds (configurable):**
 
@@ -93,19 +98,20 @@ Platform-agnostic admission logic that determines how many executors a query nee
 
 ### 2. ElasticResourceAllocator
 
-**Package:** `com.dremio.resource.elastic`  
+**Package:** `com.dremio.resource.elastic`
 **Extends:** `BasicResourceAllocator`
 
 The main entry point for elastic scaling. Overrides the `allocate()` method to add scaling logic before delegating to the base allocator.
 
 **Flow:**
-1. Check if elastic scaling is enabled in config
-2. Get the query cost from `ResourceSchedulingProperties`
-3. Calculate required executors via `ElasticAdmissionCalculator`
-4. Get current available executors from the `ResourcePlatform`
-5. If more executors are needed, call `scaleExecutors()` on the platform
-6. Wait up to 5 minutes for executors to become ready
-7. Delegate to `BasicResourceAllocator.allocate()` for standard allocation
+1. Get the query cost from `ResourceSchedulingProperties`
+2. Calculate required executors via `ElasticAdmissionCalculator`
+3. Register demand in per-tier active-jobs map (feeds Micrometer gauges)
+4. Wait for executors to become ready (KEDA scales Deployment, timeout from config)
+5. Delegate to `BasicResourceAllocator.allocate()` for standard allocation
+6. When the query completes and `ResourceSet.close()` is called, remove the demand entry so the gauge drops and KEDA can scale down
+
+**Demand tracking:** Uses `ConcurrentHashMap<Long, Integer>` per tier. Each query's demand is keyed by a unique job ID. The Micrometer gauge computes `max(values())` — this correctly tracks peak demand across concurrent queries and never under-counts.
 
 **Fail-fast behavior:** If elastic is enabled but the platform returns a `NoOpResourcePlatform`, an `IllegalStateException` is thrown immediately.
 
@@ -113,64 +119,47 @@ The main entry point for elastic scaling. Overrides the `allocate()` method to a
 
 **Package:** `com.dremio.resource.elastic`
 
-Platform-agnostic abstraction for resource management operations.
+Interface for Kubernetes resource management for elastic executor scaling.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `getReadyNodeCount()` | `int` | Number of ready worker nodes |
 | `getReadyPodCount()` | `int` | Number of ready executor pods |
+| `getReadyPodCount(tier)` | `int` | Number of ready executor pods for a specific tier |
 | `getAvailableExecutors()` | `int` | Number of executors registered with Dremio coordinator |
+| `getAvailableExecutors(tier)` | `int` | Number of executors registered for a specific tier |
 | `waitForExecutors(count, timeout, unit)` | `boolean` | Blocks until executors are ready or timeout |
-| `scaleExecutors(scaleDelta)` | `boolean` | Scale up (positive) or down (negative) |
+| `waitForExecutors(count, tier, timeout, unit)` | `boolean` | Blocks until tier-specific executors are ready |
+| `scaleExecutors(scaleDelta)` | `boolean` | No-op (KEDA handles scaling); returns `false` |
+| `scaleExecutors(scaleDelta, tier)` | `boolean` | No-op (KEDA handles scaling); returns `false` |
 
-### 4. K8sPlatform (Production-Ready)
+### 4. K8sPlatform (Read-Only)
 
-**Package:** `com.dremio.resource.elastic`  
+**Package:** `com.dremio.resource.elastic`
 **Dependency:** `io.fabric8:kubernetes-client:6.0.0`
+**Implements:** `ResourcePlatform`, `Closeable`
 
-Full Kubernetes implementation using the Fabric8 K8s client.
+Read-only Kubernetes implementation using the Fabric8 K8s client. Scaling is handled entirely by KEDA ScaledObjects. This class only observes executor state.
 
-**Scale Up:**
-1. Creates a ConfigMap with executor configuration (ZK address, coordinator address, disabled coordinator mode)
-2. Creates N executor Pods with:
-   - Image from `services.executor.elastic.kubernetes.image`
-   - ConfigMap volume mount at `/opt/dremio/conf`
-   - `hostAlias` mapping `dremio-coordinator-0` to the headless service DNS
-   - Image pull secret for GHCR authentication
-   - Labels: `app=dremio`, `role=executor`
+**Observation methods:**
+- `getReadyPodCount(tier)` — lists pods matching tier labels, filters by `phase=Running` and all containers ready
+- `getAvailableExecutors(tier)` — reads from ZooKeeper `ListenableSet`, filtering by `node_tag`
+- `waitForExecutors(count, tier, timeout, unit)` — polls ready pod count and ZK registration until both meet the requirement or timeout
 
-**Scale Down:**
-1. Lists executor pods matching the label selector
-2. Deletes pods up to the scale-down count
+**Cleanup:** Implements `Closeable` to close the `KubernetesClient` on coordinator shutdown.
 
-**Health Checks:**
-- `isReadyNode()` — checks `Ready=True` condition on K8s nodes
-- `isReadyPod()` — checks `phase=Running` and all containers `ready=true`
-
-**Key Design Decisions:**
-- Each scale-up creates a fresh ConfigMap with the current ZooKeeper address, ensuring executors always connect to the right coordinator
-- The `hostAlias` workaround resolves a DNS issue where Dremio uses the pod hostname instead of the service FQDN for internal communication
-- Pods are labeled with both `role=executor` and the configurable `executorLabel` for discovery
-
-### 5. Cloud Platform Stubs
-
-**AwsEc2Platform, GcpComputePlatform, AzureVmPlatform**
-
-These are structural implementations with TODO placeholders for cloud SDK integration. They implement the `ResourcePlatform` interface and wire up configuration, but the actual provisioning calls (`launchInstances`, `createVM`, etc.) are logged as warnings and not yet implemented.
-
-### 6. NoOpResourcePlatform
+### 5. NoOpResourcePlatform
 
 Singleton no-op implementation used when elastic scaling is disabled. Returns 0 for all counts and `false` for wait/scale operations.
 
-### 7. ResourcePlatformProvider
+### 6. ResourcePlatformProvider
 
-**Package:** `com.dremio.resource.elastic`  
-**Implements:** `javax.inject.Provider<ResourcePlatform>`
+**Package:** `com.dremio.resource.elastic`
+**Implements:** `javax.inject.Provider<ResourcePlatform>`, `Closeable`
 
-Factory that reads `services.executor.elastic.platform` from config and instantiates the correct platform. Performs validation:
-- Throws if elastic is enabled but platform type is not set
-- Throws if the platform type is unknown
-- Throws if required platform-specific config is missing (e.g., K8s namespace)
+Factory that creates a `K8sPlatform` when elastic scaling is enabled. The resolved platform is **lazily initialized and cached** on first access. Implements `Closeable` to clean up the `KubernetesClient` on coordinator shutdown.
+
+Performs validation:
+- Throws if elastic is enabled but required K8s config is missing (e.g., namespace)
 - For Kubernetes: validates connectivity by listing namespaces before returning
 
 ---
@@ -184,52 +173,17 @@ services.executor.elastic {
   # Master switch
   enabled: false
 
-  # Platform: kubernetes | aws-ec2 | gcp-compute | azure-vm
-  platform: "kubernetes"
-
   # Scaling bounds
   min_executors: 0
   max_executors: 10
   scale_timeout_minutes: 5
 
-  # Memory sizing
-  executor_memory_gb: 8
-  node_memory_gb: 32
-
   # Kubernetes-specific
   kubernetes {
     namespace: "dremio"
     pod_template: "dremio-executor"
-    image: "ghcr.io/rusha-corp/dremio-oss:executor-26.0.5-elastic-v3"
+    image: "dremio/dremio:latest"
     zookeeper_address: "localhost:2181"
-  }
-
-  # AWS EC2-specific
-  aws-ec2 {
-    instance_type: "m5.large"
-    ami_id: ""
-    region: "eu-west-2"
-    iam_instance_profile: ""
-    key_name: ""
-    security_group_ids: []
-    subnet_id: ""
-  }
-
-  # GCP Compute-specific
-  gcp-compute {
-    instance_type: "n2-standard-4"
-    zone: "europe-west1-b"
-    project_id: ""
-    service_account: ""
-    network: "default"
-  }
-
-  # Azure VM-specific
-  azure-vm {
-    instance_type: "Standard_D4s_v3"
-    location: "westeurope"
-    subscription_id: ""
-    managed_identity: ""
   }
 
   # Admission thresholds
@@ -247,24 +201,13 @@ Added to `com.dremio.config.DremioConfig`:
 | Constant | Config Key |
 |----------|-----------|
 | `ELASTIC_ENABLED` | `services.executor.elastic.enabled` |
-| `ELASTIC_PLATFORM` | `services.executor.elastic.platform` |
 | `ELASTIC_MIN_EXECUTORS` | `services.executor.elastic.min_executors` |
 | `ELASTIC_MAX_EXECUTORS` | `services.executor.elastic.max_executors` |
 | `ELASTIC_SCALE_TIMEOUT` | `services.executor.elastic.scale_timeout_minutes` |
-| `ELASTIC_EXECUTOR_MEMORY_GB` | `services.executor.elastic.executor_memory_gb` |
-| `ELASTIC_NODE_MEMORY_GB` | `services.executor.elastic.node_memory_gb` |
 | `ELASTIC_K8S_NAMESPACE` | `services.executor.elastic.kubernetes.namespace` |
 | `ELASTIC_K8S_POD_TEMPLATE` | `services.executor.elastic.kubernetes.pod_template` |
 | `ELASTIC_K8S_IMAGE` | `services.executor.elastic.kubernetes.image` |
 | `ELASTIC_K8S_ZOOKEEPER_ADDRESS` | `services.executor.elastic.kubernetes.zookeeper_address` |
-| `ELASTIC_AWS_EC2_INSTANCE_TYPE` | `services.executor.elastic.aws-ec2.instance_type` |
-| `ELASTIC_AWS_EC2_AMI_ID` | `services.executor.elastic.aws-ec2.ami_id` |
-| `ELASTIC_AWS_EC2_REGION` | `services.executor.elastic.aws-ec2.region` |
-| `ELASTIC_GCP_INSTANCE_TYPE` | `services.executor.elastic.gcp-compute.instance_type` |
-| `ELASTIC_GCP_ZONE` | `services.executor.elastic.gcp-compute.zone` |
-| `ELASTIC_GCP_PROJECT_ID` | `services.executor.elastic.gcp-compute.project_id` |
-| `ELASTIC_AZURE_VM_INSTANCE_TYPE` | `services.executor.elastic.azure-vm.instance_type` |
-| `ELASTIC_AZURE_LOCATION` | `services.executor.elastic.azure-vm.location` |
 | `ELASTIC_SMALL_QUERY_THRESHOLD` | `services.executor.elastic.small_query_threshold` |
 | `ELASTIC_MEDIUM_QUERY_THRESHOLD` | `services.executor.elastic.medium_query_threshold` |
 
@@ -314,10 +257,16 @@ Added to `services/resourcescheduler/pom.xml`:
 | File | Purpose |
 |------|---------|
 | `00-namespace.yaml` | Creates `dremio` namespace |
-| `01-rbac.yaml` | ServiceAccount `dremio-elastic` + ClusterRoleBinding (cluster-admin) |
+| `01-rbac.yaml` | ServiceAccount `dremio-elastic` + Role (pod/configmap CRUD, node list) + RoleBinding |
 | `02-service.yaml` | Headless service for coordinator pod DNS resolution |
-| `03-configmap.yaml` | Dremio config with `executor.elastic.enabled: true` and K8s platform settings |
+| `03-configmap.yaml` | Dremio coordinator config with `executor.elastic.enabled: true` (no hardcoded secrets) |
 | `04-coordinator.yaml` | Coordinator pod (GHCR image, 4GB heap, configmap volume) |
+| `08-liveness-service.yaml` | Liveness service for coordinator metrics endpoint |
+| `09-metrics-exporter-deployment.yaml` | Sidecar that exposes Micrometer gauges for KEDA |
+| `10-keda-scaledobject.yaml` | KEDA ScaledObjects for small/large tiers (pollingInterval: 10s) |
+| `11a-executor-small-stub.yaml` | Stub Deployment for small-tier executors (replicas: 0) |
+| `11b-executor-large-stub.yaml` | Stub Deployment for large-tier executors (replicas: 0) |
+| `11c-executor-configmaps.yaml` | ConfigMaps for both tiers (env-var credential provider, no hardcoded secrets) |
 | `deploy.sh` | Deployment script (creates GHCR image pull secret, applies all manifests) |
 
 ### Images (GHCR)
@@ -347,16 +296,10 @@ Unit tests for the admission calculator:
 | `testMediumQueryRequiresTwoExecutors` | 10M < cost <= 30M → 2 executors |
 | `testLargeQueryRequiresThreeExecutors` | cost > 30M → 3 executors |
 | `testZeroCostQueryRequiresOneExecutor` | Edge case: zero cost |
-| `testSmallExecutorMemory` | Small memory doesn't affect tier assignment |
 | `testNoScaleWhenAlreadyEnough` | Delta = 0 when capacity sufficient |
 | `testScaleDeltaWhenNotEnough` | Delta = required - current |
 | `testNoScaleWhenExactMatch` | Delta = 0 at exact capacity |
 | `testScaleFromZero` | Scaling from 0 executors |
-| `testCalculateNodesForExecutors` | Memory-based node packing |
-| `testSingleExecutorFitsInOneNode` | 1 executor / 1 node |
-| `testExactFitNoWastedNodes` | 4 x 8GB = 32GB fits 1 node |
-| `testZeroExecutorsRequiresZeroNodes` | 0 executors → 0 nodes |
-| `testManyExecutorsNeedManyNodes` | 10 executors → 3 nodes |
 
 ### K8sPlatformKubeconfigIntegrationTest
 
@@ -364,7 +307,7 @@ Integration test that validates K8s connectivity using kubeconfig:
 - Creates a `KubernetesClient` from kubeconfig
 - Lists namespaces to verify connectivity
 - Queries pods and nodes in the target namespace
-- Constructs a `K8sPlatform` and exercises `getReadyNodeCount()` and `getReadyPodCount()`
+- Constructs a `K8sPlatform` and exercises `getReadyPodCount()`
 
 ---
 
@@ -373,20 +316,19 @@ Integration test that validates K8s connectivity using kubeconfig:
 | Component | Status |
 |-----------|--------|
 | ElasticAdmissionCalculator | Complete |
-| ElasticResourceAllocator | Complete |
+| ElasticResourceAllocator | Complete (metric-driven, ConcurrentHashMap demand tracking) |
 | ResourcePlatform interface | Complete |
-| K8sPlatform | Complete (Fabric8 client, pod/ConfigMap creation, scale up/down) |
-| AwsEc2Platform | Stub (structure only, SDK integration TODO) |
-| GcpComputePlatform | Stub (structure only, SDK integration TODO) |
-| AzureVmPlatform | Stub (structure only, SDK integration TODO) |
+| K8sPlatform | Complete (read-only, Closeable) |
 | NoOpResourcePlatform | Complete |
-| ResourcePlatformProvider | Complete |
+| ResourcePlatformProvider | Complete (cached, Closeable) |
 | DremioConfig constants | Complete |
 | dremio-reference.conf | Complete |
 | DACDaemonModule wiring | Complete |
 | Unit tests | Complete |
 | K8s integration test | Complete |
-| K8s manifests | Complete (GHCR) |
+| K8s manifests | Complete (KEDA ScaledObjects, stub Deployments, static ConfigMaps) |
+| KEDA ScaledObjects | Complete (pollingInterval: 10s, per-tier) |
+| Metrics exporter | Complete (sidecar exposing Micrometer gauges) |
 
 ---
 
@@ -396,3 +338,4 @@ Integration test that validates K8s connectivity using kubeconfig:
 - When disabled, `BasicResourceAllocator` is used exactly as before
 - No changes to existing query planning or execution paths
 - The feature is additive — no existing classes are modified in their default behavior
+- Scaling is metric-driven (KEDA) — no imperative K8s API writes from Dremio

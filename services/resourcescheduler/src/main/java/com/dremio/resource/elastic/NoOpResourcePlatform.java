@@ -18,21 +18,15 @@ package com.dremio.resource.elastic;
 import java.util.concurrent.TimeUnit;
 
 /**
- * No-op ResourcePlatform implementation used when K8s is not configured.
+ * No-op ResourcePlatform implementation used when elastic scaling is disabled.
  *
- * <p>This implementation returns 0 for all counts and immediately returns false for
- * waitForExecutors.
+ * <p>Returns 0 for all counts and false for wait/scale operations.
  */
 public final class NoOpResourcePlatform implements ResourcePlatform {
 
   public static final NoOpResourcePlatform INSTANCE = new NoOpResourcePlatform();
 
   private NoOpResourcePlatform() {}
-
-  @Override
-  public int getReadyNodeCount() {
-    return 0;
-  }
 
   @Override
   public int getReadyPodCount() {

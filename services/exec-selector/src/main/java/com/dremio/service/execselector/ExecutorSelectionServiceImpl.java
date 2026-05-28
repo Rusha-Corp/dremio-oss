@@ -30,6 +30,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.stream.Collectors;
 import javax.inject.Inject;
 import javax.inject.Provider;
 import javax.inject.Singleton;
@@ -176,11 +177,40 @@ public class ExecutorSelectionServiceImpl implements ExecutorSelectionService {
         executorSelectionContext.getResourceSchedulingDecisionInfo();
     EngineId engineId = null;
     SubEngineId subEngineId = null;
+    String requiredTag = null;
     if (decision != null) {
       engineId = decision.getEngineId();
       subEngineId = decision.getSubEngineId();
+      // Route jobs to executors whose node-tag matches the assigned queue tier.
+      // decision.getQueueName() returns the QueueType enum name: LARGE, SMALL, etc.
+      // LOW_COST system queries default to the small tier.
+      String q = decision.getQueueName();
+      if ("LARGE".equals(q) || "REFLECTION_LARGE".equals(q)) {
+        requiredTag = "large";
+      } else if ("SMALL".equals(q) || "REFLECTION_SMALL".equals(q) || "LOW_COST".equals(q)) {
+        requiredTag = "small";
+      }
     }
-    return new ExecutorSelectionHandleImpl(getAvailableEndpoints(engineId, subEngineId));
+    Set<NodeEndpoint> endpoints = getAvailableEndpoints(engineId, subEngineId);
+    if (requiredTag != null) {
+      final String tag = requiredTag;
+      Set<NodeEndpoint> tagged =
+          endpoints.stream()
+              .filter(ep -> tag.equals(ep.getNodeTag()))
+              .collect(Collectors.collectingAndThen(Collectors.toSet(), ImmutableSet::copyOf));
+      if (!tagged.isEmpty()) {
+        return new ExecutorSelectionHandleImpl(tagged);
+      }
+      // No tagged executors found — fail fast rather than routing to the wrong tier.
+      // A LARGE job on a small executor causes OOM; a cross-tier fallback is never safe.
+      String queueName = decision != null ? decision.getQueueName() : "unknown";
+      throw new RuntimeException(
+          String.format(
+              "No '%s'-tagged executors are available for queue '%s'. "
+                  + "The %s executor pool is scaling up — please retry in a moment.",
+              tag, queueName, tag));
+    }
+    return new ExecutorSelectionHandleImpl(endpoints);
   }
 
   private ListenableSet getExecutorSet(EngineId engineId, SubEngineId subEngineId) {

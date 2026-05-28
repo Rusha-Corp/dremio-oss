@@ -18,29 +18,24 @@ package com.dremio.resource.elastic;
 /**
  * Platform-agnostic admission calculator for elastic executor scaling.
  *
- * <p>This class contains the core admission logic that is independent of any specific platform
- * (Kubernetes, AWS, GCP, etc.). Platform-specific implementations are provided by {@link
- * ResourcePlatform}.
+ * <p>This class contains the core admission logic that determines how many executors
+ * a query needs based on its estimated cost.
  */
 public class ElasticAdmissionCalculator {
 
-  /** Small query threshold - queries below this can share executors. */
-  private final double smallQueryThreshold;
+  /** Executor tier assignment based on query cost. */
+  public enum ExecutorTier {
+    SMALL,
+    LARGE
+  }
 
-  /** Medium query threshold - queries above this need dedicated capacity. */
+  private final double smallQueryThreshold;
   private final double mediumQueryThreshold;
 
-  /** Default constructor with standard thresholds. */
   public ElasticAdmissionCalculator() {
     this(10_000_000, 30_000_000);
   }
 
-  /**
-   * Constructor with custom thresholds.
-   *
-   * @param smallQueryThreshold threshold for small queries
-   * @param mediumQueryThreshold threshold for medium queries
-   */
   public ElasticAdmissionCalculator(double smallQueryThreshold, double mediumQueryThreshold) {
     this.smallQueryThreshold = smallQueryThreshold;
     this.mediumQueryThreshold = mediumQueryThreshold;
@@ -50,11 +45,9 @@ public class ElasticAdmissionCalculator {
    * Calculates the number of executors required to run a query.
    *
    * @param planCost the estimated query cost from PhysicalPlan.getCost()
-   * @param avgExecutorMemoryBytes average memory per executor (unused for now, reserved for future
-   *     refinement)
    * @return number of executors needed
    */
-  public int calculateRequiredExecutors(double planCost, long avgExecutorMemoryBytes) {
+  public int calculateRequiredExecutors(double planCost) {
     if (planCost <= smallQueryThreshold) {
       return 1;
     }
@@ -62,6 +55,16 @@ public class ElasticAdmissionCalculator {
       return 2;
     }
     return 3;
+  }
+
+  /**
+   * Returns the executor tier for a given query cost.
+   *
+   * @param planCost the estimated query cost from PhysicalPlan.getCost()
+   * @return ExecutorTier (SMALL for cost &le; threshold, LARGE otherwise)
+   */
+  public ExecutorTier getTier(double planCost) {
+    return planCost <= smallQueryThreshold ? ExecutorTier.SMALL : ExecutorTier.LARGE;
   }
 
   /**
@@ -73,23 +76,5 @@ public class ElasticAdmissionCalculator {
    */
   public int calculateScaleDelta(int requiredExecutors, int currentExecutors) {
     return Math.max(0, requiredExecutors - currentExecutors);
-  }
-
-  /**
-   * Calculates the number of nodes needed to run the requested executors.
-   *
-   * <p>This is platform-agnostic - it simply calculates how many nodes are needed based on memory.
-   * The actual node provisioning is handled by the {@link ResourcePlatform} implementation.
-   *
-   * @param executors number of executors needed
-   * @param nodeMemoryBytes total memory per node (e.g., 32GB)
-   * @param executorMemoryBytes memory needed per executor (e.g., 8GB)
-   * @return number of nodes required
-   */
-  public int calculateRequiredNodes(int executors, long nodeMemoryBytes, long executorMemoryBytes) {
-    if (executors <= 0) {
-      return 0;
-    }
-    return (int) Math.ceil((double) executors * executorMemoryBytes / nodeMemoryBytes);
   }
 }

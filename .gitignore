@@ -1,6 +1,7 @@
 #ignore all folders that start with period
 .*/
 !.mvn/
+k8s/
 .buildpath
 .checkstyle
 .classpath
@@ -43,3 +44,8 @@ dev-dremio.sh
 run-test.sh
 /dremio-reference.conf
 plan/
+
+# Deployment manifests and docs — not part of the codebase
+k8s/
+docs/
+ELASTIC_SCALING_IMPLEMENTATION.md

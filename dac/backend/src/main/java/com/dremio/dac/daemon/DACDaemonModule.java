@@ -1225,6 +1225,11 @@ public class DACDaemonModule implements DACModule {
           ProvisioningService.class, createProvisioningService(registry, isCoordinator, isMaster));
     }
 
+    // Bind ResourcePlatformProvider for elastic scaling
+    ResourcePlatformProvider resourcePlatformProvider =
+        new ResourcePlatformProvider(config, registry.provider(ClusterCoordinator.class));
+    registry.bind(ResourcePlatformProvider.class, resourcePlatformProvider);
+
     // Check if elastic scaling is enabled
     boolean elasticEnabled = config.getBoolean(DremioConfig.ELASTIC_ENABLED);
 
@@ -1235,7 +1240,7 @@ public class DACDaemonModule implements DACModule {
           new ElasticResourceAllocator(
               registry.provider(ClusterCoordinator.class),
               registry.provider(GroupResourceInformation.class),
-              new ResourcePlatformProvider(config, registry.provider(ClusterCoordinator.class)),
+              registry.provider(ResourcePlatformProvider.class),
               config));
     } else {
       // Use BasicResourceAllocator for standard operation
@@ -2020,14 +2025,16 @@ public class DACDaemonModule implements DACModule {
   }
 
   protected String getFabricAddress() {
-    // Fabric
-    final String fabricAddress;
+    String podIp = System.getenv("POD_IP");
+    if (podIp != null && !podIp.isEmpty()) {
+      logger.info("Using POD_IP env var as fabric address: {}", podIp);
+      return podIp;
+    }
     try {
-      fabricAddress = FabricServiceImpl.getAddress(false);
+      return FabricServiceImpl.getAddress(false);
     } catch (UnknownHostException e) {
       throw new RuntimeException("Cannot get local address", e);
     }
-    return fabricAddress;
   }
 
   // Registering heap monitor manager as a service,

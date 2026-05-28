@@ -35,7 +35,7 @@ import org.slf4j.LoggerFactory;
  * <ol>
  *   <li>Calculate required executors from query cost
  *   <li>Check current available executors
- *   <li>If not enough, scale nodes/pods via ResourcePlatform
+ *   <li>If not enough, scale executors via ResourcePlatform
  *   <li>Wait for executors to register with Dremio Coordinator
  *   <li>Proceed with normal allocation
  * </ol>
@@ -48,6 +48,7 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
   private final Provider<ResourcePlatform> resourcePlatformProvider;
   private final ElasticAdmissionCalculator calculator;
   private final DremioConfig config;
+  private final int scaleTimeoutMinutes;
 
   @Inject
   public ElasticResourceAllocator(
@@ -58,6 +59,7 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
     super(clusterCoordinatorProvider, clusterResourceInformationProvider);
     this.resourcePlatformProvider = resourcePlatformProvider;
     this.config = config;
+    this.scaleTimeoutMinutes = config.getInt(DremioConfig.ELASTIC_SCALE_TIMEOUT);
     this.calculator =
         new ElasticAdmissionCalculator(
             config.getInt(DremioConfig.ELASTIC_SMALL_QUERY_THRESHOLD),
@@ -71,9 +73,7 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
       com.dremio.resource.ResourceSchedulingObserver resourceSchedulingObserver,
       Consumer<com.dremio.resource.ResourceSchedulingDecisionInfo> schedulingDecisionInfoConsumer) {
 
-    // Check if elastic scaling is enabled
     if (!config.getBoolean(DremioConfig.ELASTIC_ENABLED)) {
-      // Elastic not enabled, use basic allocation
       return super.allocate(
           queryContext,
           resourceSchedulingProperties,
@@ -81,80 +81,71 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
           schedulingDecisionInfoConsumer);
     }
 
-    // Get ResourcePlatform - this will throw if elastic is enabled but platform is misconfigured
     ResourcePlatform resourcePlatform = resourcePlatformProvider.get();
 
-    // If we get here with NoOp, something is wrong - fail fast
     if (resourcePlatform == NoOpResourcePlatform.INSTANCE) {
       throw new IllegalStateException(
           "Elastic executor is enabled but no valid platform is configured. "
-              + "Please configure services.executor.elastic.platform.type and associated settings.");
+              + "Please configure services.executor.elastic.kubernetes settings.");
     }
 
-    // Get query cost
-    double planCost = resourceSchedulingProperties.getQueryCost();
-    long executorMemory = getExecutorMemoryBytes(queryContext);
+    // Null-safe: getQueryCost() returns Double (nullable)
+    Double rawCost = resourceSchedulingProperties.getQueryCost();
+    double planCost = rawCost != null ? rawCost : 0.0;
 
-    // Step 1: Calculate required executors
-    int requiredExecutors = calculator.calculateRequiredExecutors(planCost, executorMemory);
-
-    // Step 2: Get current available executors via platform
-    int availableExecutors = resourcePlatform.getAvailableExecutors();
-
-    // Step 3: Check if we need to scale
+    // Step 1: Calculate required executors and tier
+    int requiredExecutors = calculator.calculateRequiredExecutors(planCost);
+    ElasticAdmissionCalculator.ExecutorTier tier = calculator.getTier(planCost);
+    // Use tier-aware count so a running small executor does not satisfy a LARGE query's requirement
+    int availableExecutors = resourcePlatform.getAvailableExecutors(tier);
     int scaleDelta = calculator.calculateScaleDelta(requiredExecutors, availableExecutors);
 
     if (scaleDelta > 0) {
       logger.info(
-          "Elastic scaling: query cost {} requires {} executors, have {}. Scaling by {}",
+          "Elastic scaling: query cost {} requires {} {} executors, have {}. Scaling by {}",
           planCost,
           requiredExecutors,
+          tier,
           availableExecutors,
           scaleDelta);
 
-      // Scale the executors (create pods)
-      boolean podsCreated = resourcePlatform.scaleExecutors(scaleDelta);
-      if (!podsCreated) {
+      // Step 2: Scale the executors for the appropriate tier
+      boolean scaled = resourcePlatform.scaleExecutors(scaleDelta, tier);
+      if (!scaled) {
         throw new RuntimeException(
-            "Elastic scaling failed: could not provision required executors");
+            "Elastic scaling failed: could not provision "
+                + scaleDelta
+                + " executors for query with cost "
+                + planCost);
       }
 
-      // Calculate required nodes
-      long nodeMemory = getNodeMemoryBytes(queryContext);
-      int requiredNodes =
-          calculator.calculateRequiredNodes(requiredExecutors, nodeMemory, executorMemory);
-
-      // Wait for scaling with timeout (5 minutes)
+      // Step 3: Wait for executors of the correct tier to become ready
+      boolean ready = false;
       try {
-        boolean scaled = resourcePlatform.waitForExecutors(requiredExecutors, 5, TimeUnit.MINUTES);
-
-        if (!scaled) {
-          throw new RuntimeException(
-              "Elastic scaling timeout: could not provision required executors within 5 minutes");
-        }
+        ready =
+            resourcePlatform.waitForExecutors(
+                requiredExecutors, tier, scaleTimeoutMinutes, TimeUnit.MINUTES);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
-        throw new RuntimeException("Elastic scaling interrupted", e);
       }
 
-      logger.info(
-          "Elastic scaling complete: {} executors available",
-          resourcePlatform.getAvailableExecutors());
+      if (!ready) {
+        logger.warn(
+            "Elastic scaling timeout after {}min for {} executors, proceeding with available executors",
+            scaleTimeoutMinutes,
+            requiredExecutors);
+      } else {
+        logger.info(
+            "Elastic scaling complete: {} executors available",
+            resourcePlatform.getAvailableExecutors());
+      }
     }
 
-    // Step 4: Proceed with normal allocation
+    // Step 4: Delegate to BasicResourceAllocator
     return super.allocate(
         queryContext,
         resourceSchedulingProperties,
         resourceSchedulingObserver,
         schedulingDecisionInfoConsumer);
-  }
-
-  private long getExecutorMemoryBytes(ResourceSchedulingContext context) {
-    return config.getInt(DremioConfig.ELASTIC_EXECUTOR_MEMORY_GB) * 1024L * 1024L * 1024L;
-  }
-
-  private long getNodeMemoryBytes(ResourceSchedulingContext context) {
-    return config.getInt(DremioConfig.ELASTIC_NODE_MEMORY_GB) * 1024L * 1024L * 1024L;
   }
 }

@@ -1,32 +1,34 @@
 # Dremio K8s Elastic Scaling Deployment
 
 ## Overview
-Deployment manifests for Dremio with elastic executor scaling on Kubernetes. Images are hosted on GitHub Container Registry (GHCR) under the Rusha-Corp organization.
+Deployment manifests for Dremio with elastic executor scaling on Kubernetes.
+
+## Images
+
+| Image | Registry URI | Source |
+|---|---|---|
+| Dremio OSS (coordinator + executor) | `ghcr.io/rusha-corp/dremio-oss:2026.05.0` | Single binary with role determined by ConfigMap |
+| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.0` | [github.com/Rusha-Corp/dremio-keda-exporter](https://github.com/Rusha-Corp/dremio-keda-exporter) |
 
 ## Prerequisites
-1. Docker images built and pushed to GHCR:
-   - `ghcr.io/rusha-corp/dremio-oss:coordinator-26.0.5-elastic`
-   - `ghcr.io/rusha-corp/dremio-oss:executor-26.0.5-elastic-v3`
+1. Kubernetes cluster (minikube or actual cluster)
+2. ConfigMap and secrets for credentials (see below)
 
-2. GitHub credentials configured for GHCR push:
-   ```bash
-   echo $GITHUB_TOKEN | docker login ghcr.io -u <username> --password-stdin
-   ```
-
-3. Kubernetes cluster (minikube or actual cluster)
-
-4. Environment variables for deploy.sh:
-   - `GHCR_USERNAME` - GitHub username for GHCR authentication
-   - `GHCR_TOKEN` - GitHub personal access token with `read:packages` scope
+## Environment variables for deploy.sh:
+- `GHCR_USERNAME` - GitHub username for GHCR authentication
+- `GHCR_TOKEN` - GitHub personal access token with `read:packages` scope
 
 ## Manifests
 | File | Description |
 |------|-------------|
 | `00-namespace.yaml` | Namespace definition |
 | `01-rbac.yaml` | Service account and ClusterRoleBinding |
-| `02-service.yaml` | Headless service for coordinator pod DNS |
 | `03-configmap.yaml` | Dremio configuration with elastic scaling settings |
 | `04-coordinator.yaml` | Coordinator pod definition |
+| `09-metrics-exporter-deployment.yaml` | Metrics exporter deployment for KEDA |
+| `10-keda-scaledobject.yaml` | KEDA ScaledObject for scale-down |
+| `11a-executor-small-stub.yaml` | StatefulSet stub for small tier |
+| `11b-executor-large-stub.yaml` | StatefulSet stub for large tier |
 | `deploy.sh` | Deployment script |
 
 ## Deployment
@@ -65,7 +67,11 @@ kubectl get pods -n dremio -l role=executor
 
 | Issue | Solution |
 |-------|----------|
-| Executor not spawning | Check coordinator logs: `kubectl logs dremio-coordinator-0 -n dremio \| grep -i elastic` |
+| Executor not spawning | Check coordinator logs: `kubectl logs dremio-coordinator-0 -n dremio | grep -i elastic` |
 | Executor can't connect to coordinator | Verify hostAlias and DNS: `kubectl exec <executor-pod> -n dremio -- getent hosts dremio-coordinator.dremio.svc.cluster.local` |
 | ImagePullBackOff | Recreate GHCR secret: `kubectl create secret docker-registry ghcr-secret --docker-server=ghcr.io --docker-username=$GHCR_USERNAME --docker-password=$GHCR_TOKEN --namespace=dremio` |
 | ConfigMap properties invalid | Use only properties supported by the base image version |
+
+---
+
+**Note:** The KEDA metrics-exporter source is maintained in a separate repository: [github.com/Rusha-Corp/dremio-keda-exporter](https://github.com/Rusha-Corp/dremio-keda-exporter)

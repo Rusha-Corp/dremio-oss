@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dremio-ingress
+  namespace: dremio
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-route53-clusterwide
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: dremio.contabo62.tierravivaai.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dremio-coordinator-ingress
+                port:
+                  number: 9047
+  tls:
+    - hosts:
+        - dremio.contabo62.tierravivaai.net
+      secretName: dremio-tls

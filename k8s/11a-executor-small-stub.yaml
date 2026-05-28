@@ -37,7 +37,7 @@ spec:
         kubernetes.io/hostname: vmi1594378.contaboserver.net
       containers:
         - name: executor
-          image: ghcr.io/rusha-corp/dremio-oss:2026.05.4
+          image: ghcr.io/rusha-corp/dremio-oss:2026.05.5
           imagePullPolicy: Always
           securityContext:
             runAsUser: 0

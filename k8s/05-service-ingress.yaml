@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dremio-coordinator-ingress
+  namespace: dremio
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9047
+      targetPort: 9047
+      name: web
+  selector:
+    app: dremio
+    role: coordinator

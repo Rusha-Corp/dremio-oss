@@ -1,0 +1,21 @@
+# Shared PersistentVolume and PersistentVolumeClaim for Dremio paths.dist.
+#
+# Uses Longhorn (RWX) so coordinator and all executor pods (small and large)
+# share the same distributed storage regardless of which node they land on.
+#
+# For single-node dev environments without Longhorn, replace the StorageClass
+# with local-path and change accessModes to ReadWriteOnce.
+#
+# For production multi-node: Longhorn RWX or S3/GCS/ABFSS as paths.dist.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dremio-dist
+  namespace: dremio
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 50Gi

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  minio-wildcard.override: |
+    rewrite name suffix .minio.dremio.svc.cluster.local minio.dremio.svc.cluster.local answer auto

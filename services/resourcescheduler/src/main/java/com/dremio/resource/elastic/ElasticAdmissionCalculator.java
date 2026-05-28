@@ -68,6 +68,21 @@ public class ElasticAdmissionCalculator {
   }
 
   /**
+   * Returns the executor tier for a given query cost and routing queue.
+   * If the routing queue contains "large" (case-insensitive), returns LARGE regardless of cost.
+   *
+   * @param planCost the estimated query cost from PhysicalPlan.getCost()
+   * @param routingQueue the routing queue name (e.g. "query.large", "query.small")
+   * @return ExecutorTier (LARGE if queue contains "large", otherwise based on cost)
+   */
+  public ExecutorTier getTier(double planCost, String routingQueue) {
+    if (routingQueue != null && routingQueue.toLowerCase().contains("large")) {
+      return ExecutorTier.LARGE;
+    }
+    return getTier(planCost);
+  }
+
+  /**
    * Calculates how many additional executors need to be scaled up.
    *
    * @param requiredExecutors total executors needed

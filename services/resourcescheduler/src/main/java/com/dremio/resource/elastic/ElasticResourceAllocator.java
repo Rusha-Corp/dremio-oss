@@ -92,10 +92,11 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
     // Null-safe: getQueryCost() returns Double (nullable)
     Double rawCost = resourceSchedulingProperties.getQueryCost();
     double planCost = rawCost != null ? rawCost : 0.0;
+    String routingQueue = resourceSchedulingProperties.getRoutingQueue();
 
     // Step 1: Calculate required executors and tier
     int requiredExecutors = calculator.calculateRequiredExecutors(planCost);
-    ElasticAdmissionCalculator.ExecutorTier tier = calculator.getTier(planCost);
+    ElasticAdmissionCalculator.ExecutorTier tier = calculator.getTier(planCost, routingQueue);
     // Use tier-aware count so a running small executor does not satisfy a LARGE query's requirement
     int availableExecutors = resourcePlatform.getAvailableExecutors(tier);
     int scaleDelta = calculator.calculateScaleDelta(requiredExecutors, availableExecutors);

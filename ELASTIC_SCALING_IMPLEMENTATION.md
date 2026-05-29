@@ -21,6 +21,8 @@ The feature is **disabled by default** and does not alter existing Dremio behavi
 
 Executors are tagged via `node-tag: "small"` or `node-tag: "large"` in their ConfigMap. `ExecutorSelectionServiceImpl` routes queries by `queueName` to only executors with matching `node_tag`.
 
+**Important:** Dremio's planner reports `planCost = 1.0` for most queries (metadata queries, simple SELECTs, reflections). The `ElasticAdmissionCalculator.getTier()` method uses `routingQueue` as the **primary signal** for tier detection — if the queue contains `"large"` (case-insensitive), queries are classified as LARGE regardless of plan cost. Plan cost acts only as a secondary fallback when no queue is configured.
+
 ### Drain Window Configuration
 
 All three layers of the scaling pipeline are aligned to a 30-minute drain window:
@@ -31,6 +33,13 @@ All three layers of the scaling pipeline are aligned to a 30-minute drain window
 | KEDA HPA | `stabilizationWindowSeconds` | 1800s (30min) | Smooth replica changes |
 | Exporter | `SCALE_DOWN_GRACE_SECS` | 1800s (30min) | Hold desired ≥ 1 during drain |
 | Executor pod | `terminationGracePeriodSeconds` | 1800s (30min) | Allow in-flight query completion |
+
+**Observed scale-down sequence:** In production, when no activity occurs for 30+ minutes:
+1. Signal 3 (annotation) expires first, then Signal 2 (ready-replica window) takes over
+2. Exporter logs `\"large tier idle Xs (past grace), scaling to 0\"` when both expire
+3. KEDA exits `ScalerCooldown` after its own 30-min cooldown
+4. HPA `stabilizationWindowSeconds=1800` provides a final 30-min buffer
+5. Total cold-start-to-zero time: ~30-60 min depending on which signal fired last
 
 ---
 
@@ -94,11 +103,11 @@ The exporter maintains a 30-minute `SCALE_DOWN_GRACE_SECS` window per tier. If *
 Query Arrives (e.g., 7-way cross join)
         │
         ▼
-ElasticAdmissionCalculator (cost=72M)
+ElasticAdmissionCalculator
         │
-        ├─► tier = LARGE
-        ├─► requiredExecutors = 3
-        └─► current = 0 (none running)
+        ├─► routingQueue = \"query.large\"  ← primary signal
+        ├─► tier = LARGE  (queue contains \"large\")
+        └─► planCost = 1.0  (ignored when queue set)
                 │
                 ▼
         ElasticResourceAllocator.allocate()
@@ -154,7 +163,16 @@ Platform-agnostic admission logic that determines how many executors a query nee
 |--------|-------------|
 | `calculateRequiredExecutors(planCost)` | Returns 1, 2, or 3 executors based on cost thresholds |
 | `calculateScaleDelta(requiredExecutors, currentExecutors)` | Returns how many executors to add (0 if sufficient) |
-| `getTier(planCost)` | Returns `ExecutorTier.SMALL` or `ExecutorTier.LARGE` |
+| `getTier(planCost)` | **Deprecated.** Cost-only: SMALL if cost ≤ 10M, else LARGE |
+| `getTier(planCost, routingQueue)` | **Primary method.** Returns LARGE if `routingQueue` contains \"large\" (case-insensitive), otherwise falls back to cost-based detection |
+
+**Routing queue as primary signal:**
+
+| Queue Name | Required Tag | Result |
+|------------|--------------|--------|
+| `LARGE`, `REFLECTION_LARGE`, `WS.large` | `"large"` | LARGE tier regardless of plan cost |
+| `SMALL`, `REFLECTION_SMALL`, `LOW_COST` | `"small"` | Falls back to cost |
+| `null` / unrecognised | (none) | Falls back to cost |
 
 **Cost Thresholds (configurable):**
 
@@ -164,7 +182,7 @@ Platform-agnostic admission logic that determines how many executors a query nee
 | Medium | 10M < cost <= 30,000,000 | 2 | SMALL |
 | Large | cost > 30,000,000 | 3 | LARGE |
 
-**Note:** The `ELASTIC_MEDIUM_QUERY_THRESHOLD` (30M) is defined in config but the current implementation only uses `SMALL` and `LARGE` tiers. Medium queries are routed to the SMALL tier.
+> **Important:** In practice Dremio reports `planCost = 1.0` for most queries (metadata queries, simple SELECTs, reflections). The `routingQueue` parameter (e.g. `"query.large"`) is therefore the primary signal for tier assignment. The plan cost acts only as a secondary fallback when no queue is configured.
 
 ### 2. ExecutorSelectionServiceImpl
 
@@ -476,8 +494,8 @@ Added to `services/resourcescheduler/pom.xml`:
 | `07-hpa.yaml` | HorizontalPodAutoscaler for coordinator (min 1, max 2) |
 | `09-metrics-exporter-deployment.yaml` | Exporter deployment (image: `2026.05.4`, sidecar for KEDA metrics) |
 | `10-keda-scaledobject.yaml` | KEDA ScaledObjects for small (minReplica: 1) and large (minReplica: 0) tiers |
-| `11a-executor-small-stub.yaml` | StatefulSet for small executors (image: `2026.05.4`, replicas: 0, KEDA-controlled) |
-| `11b-executor-large-stub.yaml` | StatefulSet for large executors (image: `2026.05.4`, replicas: 0, KEDA-controlled) |
+| `11a-executor-small-stub.yaml` | StatefulSet for small executors (image: `2026.05.6`, replicas: 0, KEDA-controlled) |
+| `11b-executor-large-stub.yaml` | StatefulSet for large executors (image: `2026.05.6`, replicas: 0, KEDA-controlled) |
 | `11c-executor-configmaps.yaml` | ConfigMaps: `dremio-executor-config-small` (node-tag: "small") and `dremio-executor-config-large` (node-tag: "large") |
 | `11-coredns-custom.yaml` | Custom coreDNS config for pod DNS resolution |
 | `12-minio.yaml` | MinIO deployment for test data |
@@ -490,9 +508,9 @@ Added to `services/resourcescheduler/pom.xml`:
 
 ### Images (GHCR)
 
-- **Coordinator:** `ghcr.io/rusha-corp/dremio-oss:2026.05.4`
-- **Executor:** `ghcr.io/rusha-corp/dremio-oss:2026.05.4`
-- **Metrics Exporter:** `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.4`
+- **Coordinator:** `ghcr.io/rusha-corp/dremio-oss:2026.05.6`
+- **Executor:** `ghcr.io/rusha-corp/dremio-oss:2026.05.6`
+- **Metrics Exporter:** `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.5`
 
 ### Drain Window Alignment
 
@@ -531,6 +549,8 @@ Unit tests for the admission calculator:
 | `testScaleDeltaWhenNotEnough` | Delta = required - current |
 | `testNoScaleWhenExactMatch` | Delta = 0 at exact capacity |
 | `testScaleFromZero` | Scaling from 0 executors |
+| `testGetTierWithLargeQueueName` | queue \"query.large\" → LARGE regardless of cost (primary signal) |
+| `testGetTierWithSmallOrNullQueue` | null/small queue → falls back to cost-based detection |
 
 ### K8sPlatformKubeconfigIntegrationTest
 
@@ -563,6 +583,25 @@ Integration test that validates K8s connectivity using kubeconfig:
 
 ---
 
+## Observed Scale-Down Behavior
+
+The three-signal grace logic was verified in production on 2026-05-29:
+
+1. **Signal 3 (annotation)** — Coordinator writes `dremio.io/scale-requested-at` when scaling up. Exporter holds `desired = spec.replicas` for 30 min.
+2. **Signal 2 (ready-replica window)** — When annotation expires, exporter tracks `first_ready_at` and holds for 30 min from when last executor became Ready.
+3. **Signal 1 (job history)** — If no executors were cold-started, any recent job with `endTime` within 1800s resets the timer.
+
+**Observed timeline (large tier):**
+- Annotation expired at ~06:50 (520s after initial cold-start)
+- Ready-replica window expired at ~06:50+605s = ~07:00
+- KEDA `ScalerCooldown` expired at ~07:19 (30 min after first `desired=0`)
+- HPA `stabilizationWindowSeconds=1800` expired
+- `large-1` began Terminating at ~07:19
+- Both large executors gone by ~07:24
+- Total cold-start-to-zero time: ~45 minutes
+
+---
+
 ## Backward Compatibility
 
 - **Default off:** `services.executor.elastic.enabled` defaults to `false`
@@ -586,6 +625,10 @@ The 30-minute `SCALE_DOWN_GRACE_SECS` is designed to protect in-flight queries a
 - First query after idle period triggers scale-up → 2-3 minutes for executors to start and register
 - `waitForExecutors()` timeout (default 5min) provides fail-safe fallback
 - If no executors available after 5min, query fails with clear error message
+
+### Plan Cost Reliability
+
+Dremio's planner reports `planCost = 1.0` for most queries (metadata queries, simple SELECTs, reflections). The tier detection was updated to use `routingQueue` as the primary signal and plan cost only as a fallback. This is set via Dremio's queue policies (WLM rules).
 
 ### KEDA Race Handling
 

@@ -42,7 +42,7 @@ envsubst < "$SCRIPT_DIR/03-configmap.yaml" | kubectl apply -f -
 envsubst < "$SCRIPT_DIR/04-coordinator.yaml" | kubectl apply -f -
 envsubst < "$SCRIPT_DIR/05-service-ingress.yaml" | kubectl apply -f -
 envsubst < "$SCRIPT_DIR/06-ingress.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/07-hpa.yaml" | kubectl apply -f -
+# envsubst < "$SCRIPT_DIR/07-hpa.yaml" | kubectl apply -f -  # Replaced by KEDA ScaledObject
 envsubst < "$SCRIPT_DIR/09-metrics-exporter-deployment.yaml" | kubectl apply -f -
 envsubst < "$SCRIPT_DIR/10-keda-scaledobject.yaml" | kubectl apply -f -
 envsubst < "$SCRIPT_DIR/11a-executor-small-stub.yaml" | kubectl apply -f -

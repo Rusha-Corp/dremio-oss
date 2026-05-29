@@ -21,7 +21,6 @@ import io.fabric8.kubernetes.api.model.apps.StatefulSet;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import java.io.Closeable;
 import java.io.IOException;
-import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -201,11 +200,15 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
           currentReplicas,
           newReplicas);
 
-      // Annotate before scaling so the exporter can detect the scale request and signal
-      // KEDA to keep desired >= 1, preventing the race where KEDA overrides spec.replicas=0
-      // while this scale-up is in progress.
-      final String annotationKey = "dremio.io/scale-requested-at";
-      final String annotationValue = String.valueOf(System.currentTimeMillis());
+      // Write annotations to signal the exporter and KEDA the desired replica count.
+      // KEDA is the sole authority on spec.replicas — we do NOT write spec.replicas directly
+      // to avoid the race where KEDA overrides our value before the exporter has refreshed.
+      // The exporter reads scale-requested-count and propagates it as desired_large=N,
+      // causing KEDA to set spec.replicas=N on its next poll cycle.
+      final String atKey = "dremio.io/scale-requested-at";
+      final String atValue = String.valueOf(System.currentTimeMillis());
+      final String countKey = "dremio.io/scale-requested-count";
+      final String countValue = String.valueOf(newReplicas);
       k8sClient
           .apps()
           .statefulSets()
@@ -213,26 +216,20 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
           .withName(deploymentName)
           .edit(
               s -> {
-                s.getMetadata()
-                    .setAnnotations(
-                        s.getMetadata().getAnnotations() == null
-                            ? new java.util.HashMap<>(
-                                Collections.singletonMap(annotationKey, annotationValue))
-                            : new java.util.HashMap<String, String>(
-                                s.getMetadata().getAnnotations()) {
-                              {
-                                put(annotationKey, annotationValue);
-                              }
-                            });
+                java.util.Map<String, String> ann =
+                    s.getMetadata().getAnnotations() == null
+                        ? new java.util.HashMap<>()
+                        : new java.util.HashMap<>(s.getMetadata().getAnnotations());
+                ann.put(atKey, atValue);
+                ann.put(countKey, countValue);
+                s.getMetadata().setAnnotations(ann);
                 return s;
               });
 
-      k8sClient
-          .apps()
-          .statefulSets()
-          .inNamespace(namespace)
-          .withName(deploymentName)
-          .scale(newReplicas);
+      logger.info(
+          "Signalled desired {} replicas via annotations for {} (KEDA will apply)",
+          newReplicas,
+          deploymentName);
 
       return true;
     } catch (Exception e) {

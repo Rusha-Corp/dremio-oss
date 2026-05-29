@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit;
  * interface is intentionally minimal: it exposes observation (pod count, executor count), scaling
  * (scale up/down), and synchronization (wait for readiness).
  */
-public interface ResourcePlatform {
+public interface ResourcePlatform extends AutoCloseable {
 
   /**
    * Gets the count of ready executor pods.
@@ -111,4 +111,7 @@ public interface ResourcePlatform {
       throws InterruptedException {
     return waitForExecutors(requiredExecutors, timeout, unit);
   }
+
+  @Override
+  default void close() {}
 }

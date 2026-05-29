@@ -176,6 +176,7 @@ import com.dremio.resource.ResourceAllocator;
 import com.dremio.resource.RuleBasedEngineSelector;
 import com.dremio.resource.basic.BasicResourceAllocator;
 import com.dremio.resource.elastic.ElasticResourceAllocator;
+import com.dremio.resource.elastic.ResourcePlatform;
 import com.dremio.resource.elastic.ResourcePlatformProvider;
 import com.dremio.sabot.exec.CancelQueryContext;
 import com.dremio.sabot.exec.CoordinatorHeapClawBackStrategy;
@@ -1229,6 +1230,7 @@ public class DACDaemonModule implements DACModule {
     ResourcePlatformProvider resourcePlatformProvider =
         new ResourcePlatformProvider(config, registry.provider(ClusterCoordinator.class));
     registry.bind(ResourcePlatformProvider.class, resourcePlatformProvider);
+    registry.bind(ResourcePlatform.class, resourcePlatformProvider);
 
     // Check if elastic scaling is enabled
     boolean elasticEnabled = config.getBoolean(DremioConfig.ELASTIC_ENABLED);
@@ -1240,7 +1242,7 @@ public class DACDaemonModule implements DACModule {
           new ElasticResourceAllocator(
               registry.provider(ClusterCoordinator.class),
               registry.provider(GroupResourceInformation.class),
-              registry.provider(ResourcePlatformProvider.class),
+              registry.provider(ResourcePlatform.class),
               config));
     } else {
       // Use BasicResourceAllocator for standard operation

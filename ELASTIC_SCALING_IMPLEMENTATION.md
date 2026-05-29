@@ -638,3 +638,37 @@ The exporter's three-signal approach prevents race conditions:
 3. **Job history signal** — Any recent completed job extends the grace period
 
 This design ensures KEDA never overrides a scale-up request and executors don't terminate prematurely.
+
+---
+
+## Recent Fixes
+
+### 2026-05-29: Maven Build Regression Fix
+
+**Problem:** A regression occurred where the Maven build used `-rf :dremio-dac-daemon`, which skips `exec-selector` and `resourcescheduler` modules. The deployed Docker image contained stale JARs with the old `RuntimeException` in `ExecutorSelectionServiceImpl` instead of the fallback logic introduced in commit `91257d713`.
+
+**Impact:** Large queries routed to the `LARGE` queue failed with:
+```
+RuntimeException: No 'large'-tagged executors are available for queue 'LARGE'.
+The large executor pool is scaling up — please retry in a moment.
+```
+
+**Fix:** Updated `k8s/Dockerfile` to explicitly copy the fixed JARs after tarball extraction:
+```dockerfile
+# Copy fixed exec-selector and resourcescheduler JARs
+COPY dremio-services-execselector-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
+COPY dremio-services-resourcescheduler-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
+```
+
+This ensures the latest elastic scaling code (annotation-driven scaling, tier-aware executor wait, ResourceUnavailableException on timeout) is always deployed, even if the full Maven distribution build skips these modules.
+
+**Commit:** `0292980a1` - `k8s: Copy fixed exec-selector and resourcescheduler JARs`
+
+---
+
+## Images (GHCR)
+
+| Service | Image | Latest Tag | Build Date |
+|---------|-------|------------|------------|
+| Coordinator/Executor | `ghcr.io/rusha-corp/dremio-oss` | `2026.05.7` | 2026-05-29 |
+| Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter` | `2026.05.6` | 2026-05-29 |

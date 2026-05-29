@@ -34,7 +34,8 @@ public interface ResourceAllocator extends Service {
    */
   default ResourceSchedulingResult allocate(
       final ResourceSchedulingContext queryContext,
-      final ResourceSchedulingProperties resourceSchedulingProperties) {
+      final ResourceSchedulingProperties resourceSchedulingProperties)
+      throws ResourceAllocationException {
     return allocate(
         queryContext,
         resourceSchedulingProperties,
@@ -58,7 +59,8 @@ public interface ResourceAllocator extends Service {
       final ResourceSchedulingContext queryContext,
       final ResourceSchedulingProperties resourceSchedulingProperties,
       final ResourceSchedulingObserver resourceSchedulingObserver,
-      final Consumer<ResourceSchedulingDecisionInfo> resourceDecisionConsumer);
+      final Consumer<ResourceSchedulingDecisionInfo> resourceDecisionConsumer)
+      throws ResourceAllocationException;
 
   void cancel(final ResourceSchedulingContext queryContext);
 
@@ -86,7 +88,8 @@ public interface ResourceAllocator extends Service {
             ResourceSchedulingContext queryContext,
             ResourceSchedulingProperties resourceSchedulingProperties,
             ResourceSchedulingObserver resourceSchedulingObserver,
-            Consumer<ResourceSchedulingDecisionInfo> resourceDecisionConsumer) {
+            Consumer<ResourceSchedulingDecisionInfo> resourceDecisionConsumer)
+            throws ResourceAllocationException {
           throw new UnsupportedOperationException();
         }
 

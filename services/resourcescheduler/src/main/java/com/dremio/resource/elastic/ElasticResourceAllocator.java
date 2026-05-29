@@ -16,6 +16,7 @@
 package com.dremio.resource.elastic;
 
 import com.dremio.config.DremioConfig;
+import com.dremio.resource.exception.ResourceUnavailableException;
 import com.dremio.resource.basic.BasicResourceAllocator;
 import com.dremio.resource.common.ResourceSchedulingContext;
 import com.dremio.service.coordinator.ClusterCoordinator;
@@ -71,7 +72,8 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
       ResourceSchedulingContext queryContext,
       com.dremio.resource.ResourceSchedulingProperties resourceSchedulingProperties,
       com.dremio.resource.ResourceSchedulingObserver resourceSchedulingObserver,
-      Consumer<com.dremio.resource.ResourceSchedulingDecisionInfo> schedulingDecisionInfoConsumer) {
+      Consumer<com.dremio.resource.ResourceSchedulingDecisionInfo> schedulingDecisionInfoConsumer)
+      throws com.dremio.resource.exception.ResourceAllocationException {
 
     if (!config.getBoolean(DremioConfig.ELASTIC_ENABLED)) {
       return super.allocate(
@@ -131,10 +133,11 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
       }
 
       if (!ready) {
-        logger.warn(
-            "Elastic scaling timeout after {}min for {} executors, proceeding with available executors",
-            scaleTimeoutMinutes,
-            requiredExecutors);
+        throw new ResourceUnavailableException(
+            String.format(
+                "%s executors did not become available within %d minute(s). "
+                    + "Scaling is in progress — the query has been cancelled; please retry.",
+                tier, scaleTimeoutMinutes));
       } else {
         logger.info(
             "Elastic scaling complete: {} executors available",

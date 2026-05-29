@@ -201,14 +201,16 @@ public class ExecutorSelectionServiceImpl implements ExecutorSelectionService {
       if (!tagged.isEmpty()) {
         return new ExecutorSelectionHandleImpl(tagged);
       }
-      // No tagged executors found — fail fast rather than routing to the wrong tier.
-      // A LARGE job on a small executor causes OOM; a cross-tier fallback is never safe.
+      // No tagged executors found — fall back to all available endpoints.
+      // Scaling/waiting was handled at resource-allocation time (ElasticResourceAllocator).
+      // If we reach here without tagged executors, something unexpected happened;
+      // log a warning and use whatever is available rather than crashing the query.
       String queueName = decision != null ? decision.getQueueName() : "unknown";
-      throw new RuntimeException(
-          String.format(
-              "No '%s'-tagged executors are available for queue '%s'. "
-                  + "The %s executor pool is scaling up — please retry in a moment.",
-              tag, queueName, tag));
+      logger.warn(
+          "No '{}'-tagged executors found for queue '{}'. Falling back to all available executors.",
+          tag,
+          queueName);
+      return new ExecutorSelectionHandleImpl(endpoints);
     }
     return new ExecutorSelectionHandleImpl(endpoints);
   }

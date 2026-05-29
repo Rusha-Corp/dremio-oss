@@ -72,7 +72,8 @@ public class BasicResourceAllocator implements ResourceAllocator {
       final ResourceSchedulingContext queryContext,
       final ResourceSchedulingProperties resourceSchedulingProperties,
       final ResourceSchedulingObserver resourceSchedulingObserver,
-      final Consumer<ResourceSchedulingDecisionInfo> schedulingDecisionInfoConsumer) {
+      final Consumer<ResourceSchedulingDecisionInfo> schedulingDecisionInfoConsumer)
+      throws ResourceAllocationException {
 
     final ResourceSchedulingDecisionInfo resourceSchedulingDecisionInfo =
         new ResourceSchedulingDecisionInfo();

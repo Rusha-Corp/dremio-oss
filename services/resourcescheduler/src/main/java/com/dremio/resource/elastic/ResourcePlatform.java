@@ -27,13 +27,6 @@ import java.util.concurrent.TimeUnit;
 public interface ResourcePlatform extends AutoCloseable {
 
   /**
-   * Gets the count of ready executor pods.
-   *
-   * @return number of ready pods
-   */
-  int getReadyPodCount();
-
-  /**
    * Gets the count of Dremio executors registered and available.
    *
    * @return number of available executors from Dremio Coordinator
@@ -41,9 +34,9 @@ public interface ResourcePlatform extends AutoCloseable {
   int getAvailableExecutors();
 
   /**
-   * Waits for the required number of executors to be ready.
+   * Waits for the required number of executors to be registered.
    *
-   * <p>This waits for both pod readiness and Dremio registration.
+   * <p>This waits for Dremio executors to register with the coordinator via ZooKeeper.
    *
    * @param requiredExecutors number of executors needed
    * @param timeout maximum time to wait
@@ -113,5 +106,5 @@ public interface ResourcePlatform extends AutoCloseable {
   }
 
   @Override
-  default void close() {}
+  default void close() throws Exception {}
 }

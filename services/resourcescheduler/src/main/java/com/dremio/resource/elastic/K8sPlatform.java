@@ -16,7 +16,6 @@
 package com.dremio.resource.elastic;
 
 import com.dremio.service.coordinator.ListenableSet;
-import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.apps.StatefulSet;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import java.io.Closeable;
@@ -45,8 +44,6 @@ import org.slf4j.LoggerFactory;
 public class K8sPlatform implements ResourcePlatform, Closeable {
   private static final Logger logger = LoggerFactory.getLogger(K8sPlatform.class);
 
-  static final String LABEL_ROLE = "role";
-
   private final KubernetesClient k8sClient;
   private final String namespace;
   private final String deploymentNameSmall;
@@ -73,21 +70,6 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   }
 
   @Override
-  public int getReadyPodCount() {
-    return (int)
-        k8sClient
-            .pods()
-            .inNamespace(namespace)
-            .withLabel("app", "dremio")
-            .withLabel(LABEL_ROLE, "executor")
-            .list()
-            .getItems()
-            .stream()
-            .filter(this::isReadyPod)
-            .count();
-  }
-
-  @Override
   public int getAvailableExecutors() {
     if (executorSet == null) {
       return 0;
@@ -100,7 +82,7 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
       throws InterruptedException {
     long deadline = System.currentTimeMillis() + unit.toMillis(timeout);
     while (System.currentTimeMillis() < deadline) {
-      if (getReadyPodCount() >= requiredExecutors && getAvailableExecutors() >= requiredExecutors) {
+      if (getAvailableExecutors() >= requiredExecutors) {
         return true;
       }
       Thread.sleep(2000);
@@ -128,22 +110,14 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
 
   @Override
   public int getAvailableExecutors(ElasticAdmissionCalculator.ExecutorTier tier) {
-    String deploymentName =
-        (tier == ElasticAdmissionCalculator.ExecutorTier.LARGE)
-            ? deploymentNameLarge
-            : deploymentNameSmall;
-    try {
-      StatefulSet sts =
-          k8sClient.apps().statefulSets().inNamespace(namespace).withName(deploymentName).get();
-      if (sts == null || sts.getStatus() == null) {
-        return 0;
-      }
-      Integer ready = sts.getStatus().getReadyReplicas();
-      return ready != null ? ready : 0;
-    } catch (Exception e) {
-      logger.warn("Failed to get ready replicas for {}: {}", deploymentName, e.getMessage());
+    if (executorSet == null) {
       return 0;
     }
+    String tag = (tier == ElasticAdmissionCalculator.ExecutorTier.LARGE) ? "large" : "small";
+    return (int)
+        executorSet.getAvailableEndpoints().stream()
+            .filter(ep -> tag.equals(ep.getNodeTag()))
+            .count();
   }
 
   @Override
@@ -241,23 +215,5 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   @Override
   public void close() throws IOException {
     k8sClient.close();
-  }
-
-  private boolean isReadyPod(Pod pod) {
-    if (pod.getStatus() == null) {
-      return false;
-    }
-
-    String phase = pod.getStatus().getPhase();
-    if (!"Running".equals(phase)) {
-      return false;
-    }
-
-    if (pod.getStatus().getContainerStatuses() == null) {
-      return false;
-    }
-
-    return pod.getStatus().getContainerStatuses().stream()
-        .allMatch(status -> Boolean.TRUE.equals(status.getReady()));
   }
 }

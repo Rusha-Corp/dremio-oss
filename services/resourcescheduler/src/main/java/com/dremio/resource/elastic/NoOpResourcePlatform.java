@@ -29,11 +29,6 @@ public final class NoOpResourcePlatform implements ResourcePlatform {
   private NoOpResourcePlatform() {}
 
   @Override
-  public int getReadyPodCount() {
-    return 0;
-  }
-
-  @Override
   public int getAvailableExecutors() {
     return 0;
   }

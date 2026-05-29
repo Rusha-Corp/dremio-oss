@@ -18,8 +18,8 @@ package com.dremio.resource.elastic;
 /**
  * Platform-agnostic admission calculator for elastic executor scaling.
  *
- * <p>This class contains the core admission logic that determines how many executors
- * a query needs based on its estimated cost.
+ * <p>This class contains the core admission logic that determines how many executors a query needs
+ * based on its estimated cost.
  */
 public class ElasticAdmissionCalculator {
 
@@ -68,8 +68,8 @@ public class ElasticAdmissionCalculator {
   }
 
   /**
-   * Returns the executor tier for a given query cost and routing queue.
-   * If the routing queue contains "large" (case-insensitive), returns LARGE regardless of cost.
+   * Returns the executor tier for a given query cost and routing queue. If the routing queue
+   * contains "large" (case-insensitive), returns LARGE regardless of cost.
    *
    * @param planCost the estimated query cost from PhysicalPlan.getCost()
    * @param routingQueue the routing queue name (e.g. "query.large", "query.small")

@@ -46,7 +46,7 @@ spec:
               mountPath: /opt/dremio/data
       containers:
         - name: coordinator
-          image: ghcr.io/rusha-corp/dremio-oss:2026.05.5
+          image: ghcr.io/rusha-corp/dremio-oss:2026.05.6
           imagePullPolicy: Always
           securityContext:
             runAsUser: 0

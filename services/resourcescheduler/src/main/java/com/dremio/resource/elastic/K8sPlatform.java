@@ -29,20 +29,19 @@ import org.slf4j.LoggerFactory;
 /**
  * Kubernetes implementation of ResourcePlatform.
  *
- * <p>Manages executor scaling by adjusting the replica count on pre-existing
- * Kubernetes StatefulSets. Two tiers are supported: SMALL and LARGE, each
- * backed by a separate StatefulSet (e.g., dremio-executor-small and
- * dremio-executor-large). The StatefulSets and their ConfigMaps must be created
- * by the operator before enabling elastic scaling — see
+ * <p>Manages executor scaling by adjusting the replica count on pre-existing Kubernetes
+ * StatefulSets. Two tiers are supported: SMALL and LARGE, each backed by a separate StatefulSet
+ * (e.g., dremio-executor-small and dremio-executor-large). The StatefulSets and their ConfigMaps
+ * must be created by the operator before enabling elastic scaling — see
  * docs/elastic-scaling-deployment.md.
  *
- * <p>StatefulSets are preferred over Deployments for Dremio executors because
- * they provide stable network identity (required for ZooKeeper registration) and
- * support shared PersistentVolumeClaims for paths.dist across multiple nodes.
+ * <p>StatefulSets are preferred over Deployments for Dremio executors because they provide stable
+ * network identity (required for ZooKeeper registration) and support shared PersistentVolumeClaims
+ * for paths.dist across multiple nodes.
  *
- * <p>This class only manages {@code .spec.replicas}; it does not create ConfigMaps,
- * StatefulSets, or Services. This avoids resource leaks and keeps the Java code
- * decoupled from deployment specifics.
+ * <p>This class only manages {@code .spec.replicas}; it does not create ConfigMaps, StatefulSets,
+ * or Services. This avoids resource leaks and keeps the Java code decoupled from deployment
+ * specifics.
  */
 public class K8sPlatform implements ResourcePlatform, Closeable {
   private static final Logger logger = LoggerFactory.getLogger(K8sPlatform.class);
@@ -102,8 +101,7 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
       throws InterruptedException {
     long deadline = System.currentTimeMillis() + unit.toMillis(timeout);
     while (System.currentTimeMillis() < deadline) {
-      if (getReadyPodCount() >= requiredExecutors
-          && getAvailableExecutors() >= requiredExecutors) {
+      if (getReadyPodCount() >= requiredExecutors && getAvailableExecutors() >= requiredExecutors) {
         return true;
       }
       Thread.sleep(2000);
@@ -122,9 +120,10 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
         (tier == ElasticAdmissionCalculator.ExecutorTier.LARGE)
             ? deploymentNameLarge
             : deploymentNameSmall;
-    int cap = (tier == ElasticAdmissionCalculator.ExecutorTier.LARGE)
-        ? maxExecutorsLarge
-        : maxExecutorsSmall;
+    int cap =
+        (tier == ElasticAdmissionCalculator.ExecutorTier.LARGE)
+            ? maxExecutorsLarge
+            : maxExecutorsSmall;
     return scaleDeployment(deploymentName, scaleDelta, cap);
   }
 
@@ -172,18 +171,14 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
 
     try {
       StatefulSet sts =
-          k8sClient
-              .apps()
-              .statefulSets()
-              .inNamespace(namespace)
-              .withName(deploymentName)
-              .get();
+          k8sClient.apps().statefulSets().inNamespace(namespace).withName(deploymentName).get();
 
       if (sts == null) {
         logger.error(
             "Executor StatefulSet {} not found in namespace {}. "
                 + "Ensure the StatefulSet is created before enabling elastic scaling.",
-            deploymentName, namespace);
+            deploymentName,
+            namespace);
         return false;
       }
 
@@ -194,30 +189,49 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
       if (newReplicas > maxReplicas) {
         logger.warn(
             "Scale cap: requested {} replicas exceeds max {}, capping at {}",
-            newReplicas, maxReplicas, maxReplicas);
+            newReplicas,
+            maxReplicas,
+            maxReplicas);
         newReplicas = maxReplicas;
       }
 
       logger.info(
-          "Scaling {} StatefulSet from {} to {} replicas", deploymentName, currentReplicas, newReplicas);
+          "Scaling {} StatefulSet from {} to {} replicas",
+          deploymentName,
+          currentReplicas,
+          newReplicas);
 
       // Annotate before scaling so the exporter can detect the scale request and signal
       // KEDA to keep desired >= 1, preventing the race where KEDA overrides spec.replicas=0
       // while this scale-up is in progress.
       final String annotationKey = "dremio.io/scale-requested-at";
       final String annotationValue = String.valueOf(System.currentTimeMillis());
-      k8sClient.apps().statefulSets().inNamespace(namespace).withName(deploymentName)
-          .edit(s -> {
-            s.getMetadata().setAnnotations(
-                s.getMetadata().getAnnotations() == null
-                    ? new java.util.HashMap<>(Collections.singletonMap(annotationKey, annotationValue))
-                    : new java.util.HashMap<String, String>(s.getMetadata().getAnnotations()) {{
-                        put(annotationKey, annotationValue);
-                      }});
-            return s;
-          });
+      k8sClient
+          .apps()
+          .statefulSets()
+          .inNamespace(namespace)
+          .withName(deploymentName)
+          .edit(
+              s -> {
+                s.getMetadata()
+                    .setAnnotations(
+                        s.getMetadata().getAnnotations() == null
+                            ? new java.util.HashMap<>(
+                                Collections.singletonMap(annotationKey, annotationValue))
+                            : new java.util.HashMap<String, String>(
+                                s.getMetadata().getAnnotations()) {
+                              {
+                                put(annotationKey, annotationValue);
+                              }
+                            });
+                return s;
+              });
 
-      k8sClient.apps().statefulSets().inNamespace(namespace).withName(deploymentName)
+      k8sClient
+          .apps()
+          .statefulSets()
+          .inNamespace(namespace)
+          .withName(deploymentName)
           .scale(newReplicas);
 
       return true;

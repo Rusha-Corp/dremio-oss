@@ -19,9 +19,7 @@ import static org.junit.Assert.assertEquals;
 
 import org.junit.Test;
 
-/**
- * Tests for ElasticAdmissionCalculator - calculates required executors based on query cost.
- */
+/** Tests for ElasticAdmissionCalculator - calculates required executors based on query cost. */
 public class ElasticAdmissionCalculatorTest {
 
   private final ElasticAdmissionCalculator calculator = new ElasticAdmissionCalculator();
@@ -77,21 +75,38 @@ public class ElasticAdmissionCalculatorTest {
 
   @Test
   public void testGetTierSmall() {
-    assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.SMALL,
-        calculator.getTier(1_000_000));
-    assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.SMALL,
-        calculator.getTier(10_000_000));
+    assertEquals(ElasticAdmissionCalculator.ExecutorTier.SMALL, calculator.getTier(1_000_000));
+    assertEquals(ElasticAdmissionCalculator.ExecutorTier.SMALL, calculator.getTier(10_000_000));
   }
 
   @Test
   public void testGetTierLarge() {
+    assertEquals(ElasticAdmissionCalculator.ExecutorTier.LARGE, calculator.getTier(10_000_001));
+    assertEquals(ElasticAdmissionCalculator.ExecutorTier.LARGE, calculator.getTier(50_000_000));
+  }
+
+  @Test
+  public void testGetTierWithLargeQueueName() {
+    // queue name overrides plan cost
     assertEquals(
         ElasticAdmissionCalculator.ExecutorTier.LARGE,
-        calculator.getTier(10_000_001));
+        calculator.getTier(1_000, "query.large"));
+    assertEquals(
+        ElasticAdmissionCalculator.ExecutorTier.LARGE, calculator.getTier(1_000, "LARGE"));
+    assertEquals(
+        ElasticAdmissionCalculator.ExecutorTier.LARGE, calculator.getTier(0, "WS.large"));
+  }
+
+  @Test
+  public void testGetTierWithSmallOrNullQueue() {
+    // falls back to cost-based when no "large" keyword
+    assertEquals(
+        ElasticAdmissionCalculator.ExecutorTier.SMALL,
+        calculator.getTier(1_000, "query.small"));
+    assertEquals(
+        ElasticAdmissionCalculator.ExecutorTier.SMALL, calculator.getTier(1_000, null));
     assertEquals(
         ElasticAdmissionCalculator.ExecutorTier.LARGE,
-        calculator.getTier(50_000_000));
+        calculator.getTier(50_000_000, null));
   }
 }

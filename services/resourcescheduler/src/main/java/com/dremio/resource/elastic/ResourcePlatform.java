@@ -20,10 +20,9 @@ import java.util.concurrent.TimeUnit;
 /**
  * Platform-agnostic interface for elastic executor scaling.
  *
- * <p>Implementations manage executor lifecycle on a specific platform
- * (e.g., Kubernetes). The interface is intentionally minimal: it exposes
- * observation (pod count, executor count), scaling (scale up/down),
- * and synchronization (wait for readiness).
+ * <p>Implementations manage executor lifecycle on a specific platform (e.g., Kubernetes). The
+ * interface is intentionally minimal: it exposes observation (pod count, executor count), scaling
+ * (scale up/down), and synchronization (wait for readiness).
  */
 public interface ResourcePlatform {
 
@@ -58,8 +57,8 @@ public interface ResourcePlatform {
   /**
    * Scales the executor count by the given delta.
    *
-   * <p>Positive delta scales up, negative delta scales down.
-   * Delegates to the small tier for backward compatibility.
+   * <p>Positive delta scales up, negative delta scales down. Delegates to the small tier for
+   * backward compatibility.
    *
    * @param scaleDelta positive to scale up, negative to scale down
    * @return true if scaling succeeded, false if failed
@@ -69,8 +68,8 @@ public interface ResourcePlatform {
   /**
    * Scales the executor count by the given delta for a specific tier.
    *
-   * <p>This allows implementations to route scaling requests to the
-   * correct Deployment (e.g., dremio-executor-small vs dremio-executor-large).
+   * <p>This allows implementations to route scaling requests to the correct Deployment (e.g.,
+   * dremio-executor-small vs dremio-executor-large).
    *
    * @param scaleDelta positive to scale up, negative to scale down
    * @param tier the executor tier (SMALL or LARGE)

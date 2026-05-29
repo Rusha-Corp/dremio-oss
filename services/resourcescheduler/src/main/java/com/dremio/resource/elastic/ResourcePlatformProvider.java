@@ -32,8 +32,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Provider for ResourcePlatform that creates a K8sPlatform when elastic scaling is enabled.
  *
- * <p>The resolved platform is lazily initialized and cached on first access.
- * Implements Closeable to clean up the KubernetesClient on coordinator shutdown.
+ * <p>The resolved platform is lazily initialized and cached on first access. Implements Closeable
+ * to clean up the KubernetesClient on coordinator shutdown.
  */
 @Singleton
 public class ResourcePlatformProvider implements Provider<ResourcePlatform>, Closeable {
@@ -123,10 +123,19 @@ public class ResourcePlatformProvider implements Provider<ResourcePlatform>, Clo
       logger.info(
           "Creating K8sPlatform for namespace: {}, small deployment: {}, large deployment: {}, "
               + "maxExecutorsSmall: {}, maxExecutorsLarge: {}",
-          namespace, deploymentNameSmall, deploymentNameLarge, maxExecutorsSmall, maxExecutorsLarge);
+          namespace,
+          deploymentNameSmall,
+          deploymentNameLarge,
+          maxExecutorsSmall,
+          maxExecutorsLarge);
       return new K8sPlatform(
-          k8sClient, namespace, deploymentNameSmall, deploymentNameLarge, executorSet,
-          maxExecutorsSmall, maxExecutorsLarge);
+          k8sClient,
+          namespace,
+          deploymentNameSmall,
+          deploymentNameLarge,
+          executorSet,
+          maxExecutorsSmall,
+          maxExecutorsLarge);
     } catch (Exception e) {
       throw new IllegalStateException(
           "Failed to connect to Kubernetes for elastic executor scaling: " + e.getMessage(), e);

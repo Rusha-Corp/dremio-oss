@@ -61,7 +61,7 @@ This guide walks through deploying Dremio OSS with KEDA-driven elastic executor 
 | Image | Registry | Notes |
 |---|---|---|
 | Dremio OSS (coordinator + executor) | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` | Same binary; role set by ConfigMap |
-| KEDA metrics exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.7` | Source: [Rusha-Corp/dremio-keda-exporter](https://github.com/Rusha-Corp/dremio-keda-exporter) |
+| KEDA metrics exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.8` | Source: [Rusha-Corp/dremio-keda-exporter](https://github.com/Rusha-Corp/dremio-keda-exporter) |
 
 ---
 
@@ -223,6 +223,8 @@ Key environment variables (configurable in the deployment manifest):
 | `DREMIO_LIVENESS_URL` | `http://dremio-coordinator-liveness.dremio.svc.cluster.local:45679/metrics` | Prometheus metrics endpoint for `elastic_desired_*` gauges |
 | `SCALE_DOWN_GRACE_SECS` | `1800` | Idle time before scaling to zero (seconds) |
 | `TERMINAL_DRAIN_SECS` | `120` | Final drain buffer after grace period (matches executor `preStop: sleep 120`) |
+| `MAX_JOB_PAGES` | `10` | Hard cap on `/apiv2/jobs` pages fetched per cycle (100 jobs/page); prevents OOM when Dremio has large job history |
+| `JOB_LOOKBACK_SECS` | `7200` | Stop pagination when jobs are older than this many seconds; any active job must have started within this window |
 
 ---
 
@@ -321,7 +323,10 @@ INFO Metrics: {'active_user_jobs': 1, 'active_large_jobs': 1, 'executor_desired_
 | Coordinator crashes: `properties were invalid: ...pod_template_large` | Config key missing from `dremio-reference.conf` | Ensure you're on image `2026.05.7`+ which includes the fix |
 | `elastic_desired_*` not on liveness endpoint | `K8sPlatform` is lazy-initialized — gauges only appear after the first scale event | Submit a query; they will appear |
 | Exporter: `Dremio unavailable: Expecting value: line 1 column 1` | `/apiv2/jobs` pagination URL bug — `next` points to web UI | Ensure exporter image is `2026.05.7`+ |
+| Exporter OOMKilled | Exporter paginating through all historical jobs — 830k+ jobs overflow 512Mi limit | Upgrade to `2026.05.8`+; set `MAX_JOB_PAGES=10` and `JOB_LOOKBACK_SECS=7200` |
+| KEDA sees `executor_desired=0`, executors won't scale up | Exporter blocked mid-pagination, returning stale cached zeros | Upgrade to `2026.05.8`+; check exporter pod memory and logs |
 | Executors not scaling up | `elastic_desired_*` not being published (old coordinator image) or exporter not reading liveness URL | Verify coordinator version; check `DREMIO_LIVENESS_URL` env var on exporter |
+| Executor evicted but disk appears nearly empty | Log flood from Netty DEBUG hex dumps filling container log quota — check kubelet stats for `logs usedBytes` | Add `logback.xml` to executor ConfigMaps with `io.netty` at `WARN` |
 | Queries interrupted during scale-down | `TERMINAL_DRAIN_SECS` too low or executor `preStop` sleep mismatch | Set `TERMINAL_DRAIN_SECS` ≥ `preStop` sleep value (default: both 120s) |
 | Metrics exporter 401 Unauthorized | `dremio-ops-credentials` secret missing or has wrong password | Recreate secret with valid Dremio admin credentials |
 | KEDA not scaling | ScaledObject `externalMetricNames` mismatch or exporter not reachable | Check `kubectl get scaledobject -n dremio` and exporter logs |

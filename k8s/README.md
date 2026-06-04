@@ -13,7 +13,7 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 | Kubernetes | k3s on a single node (`vmi1594378.contaboserver.net`) |
 | Storage | Longhorn (all PVCs use `storageClassName: longhorn`) |
 | Dremio OSS | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` |
-| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.7` |
+| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.8` |
 | KEDA | v2.x operator installed on cluster |
 | Coordinator | 1 pod, 4Gi heap |
 | Small executors | KEDA-managed StatefulSet, 4Gi heap, 15Gi/30Gi ephemeral-storage, 30Gi data PVC |
@@ -24,7 +24,7 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 | Image | Registry URI | Source |
 |---|---|---|
 | Dremio OSS (coordinator + executor) | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` | Single binary; role determined by ConfigMap |
-| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.7` | [github.com/Rusha-Corp/dremio-keda-exporter](https://github.com/Rusha-Corp/dremio-keda-exporter) |
+| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.8` | [github.com/Rusha-Corp/dremio-keda-exporter](https://github.com/Rusha-Corp/dremio-keda-exporter) |
 
 ## Manifests
 
@@ -122,6 +122,8 @@ The **terminal drain period** (`TERMINAL_DRAIN_SECS=120`) matches the executor `
 | `NAMESPACE` | `dremio` | Kubernetes namespace |
 | `SCALE_DOWN_GRACE_SECS` | `1800` | Idle seconds to hold executors after last query before scaling to zero |
 | `TERMINAL_DRAIN_SECS` | `120` | Additional hold after grace period for in-flight fragment drain |
+| `MAX_JOB_PAGES` | `10` | Hard cap on `/apiv2/jobs` pagination pages (100 jobs/page); prevents OOM when Dremio has large job history |
+| `JOB_LOOKBACK_SECS` | `7200` | Stop pagination when jobs are older than this many seconds; active jobs must have started within this window |
 
 The metrics exporter requires `dremio-ops-credentials` secret:
 ```bash
@@ -367,7 +369,33 @@ else:
 
 This is fixed in `dremio-keda-exporter:2026.05.7`.
 
-### 9. New `DremioConfig` keys must be added to `dremio-reference.conf`
+### 9. Metrics Exporter OOMKill and Stale-Zero Metrics from Full Job History Pagination
+
+**Symptom:** Exporter pod is OOMKilled (512Mi limit), or KEDA sees `executor_desired_small=0` and never scales up even when queries are submitted.
+
+**Root cause:** The exporter's `list_jobs()` method followed every pagination page of `/apiv2/jobs`, accumulating all historical jobs in memory. With 830,000+ completed jobs in Dremio's history:
+1. All job dicts held in the `all_jobs` list → ~415MB → OOMKill at 512Mi
+2. Pagination takes several minutes → the background collection thread is blocked → `/json` returns a stale snapshot with 0 active jobs → KEDA holds at 0 replicas
+
+**Fix:** Exporter `2026.05.8` stops pagination as soon as it encounters a job whose `startTime` is older than `JOB_LOOKBACK_SECS` (default 2h). Any currently-active job must have started within this window, so older pages are irrelevant. A hard `MAX_JOB_PAGES=10` cap guards against edge cases. Both limits are tunable via env vars.
+
+A related fix: any exception from the Dremio API (not just `TimeoutError`) now fails open (`active_user_jobs=99`), preventing KEDA from scaling to zero on transient connection errors.
+
+### 10. Executor Log Flood from Netty DEBUG Hex Dumps
+
+**Symptom:** Small executor evicted for `Pod ephemeral local storage usage exceeds the total limit of containers 30Gi`, but `df` inside the pod shows only ~1GB used. Kubelet stats show `logs usedBytes: 10+ GB` while `rootfs usedBytes: ~124MB`.
+
+**Root cause:** The ConfigMap volume mount for `/opt/dremio/conf` hides the distribution's bundled `logback.xml`. The fallback classpath config (from `sabot-kernel.jar`) leaves `io.netty` at DEBUG level and sends all wire traffic to stdout. With S3-backed queries, every 8KB HTTP response chunk is hex-dumped as ~512 lines of text, generating ~1 GB/min of container log output. The kubelet counts stdout/stderr (captured to `/var/log/pods/`) toward the pod's ephemeral-storage limit separately from the overlay writable layer.
+
+**Fix:** Add a `logback.xml` key directly to the executor ConfigMaps that explicitly sets `io.netty` to `WARN`:
+```xml
+<logger name="io.netty" level="WARN"/>
+<logger name="software.amazon.awssdk" level="WARN"/>
+<logger name="com.amazonaws" level="WARN"/>
+```
+This is already present in `10-configmap-executor-small.yaml` and `11-configmap-executor-large.yaml`.
+
+### 12. New `DremioConfig` keys must be added to `dremio-reference.conf`
 
 **Symptom:** Coordinator crashes at startup with:
 ```
@@ -386,7 +414,7 @@ COPY dremio-common-26.0.5-...jar /opt/dremio/jars/
 COPY dremio-services-resourcescheduler-26.0.5-...jar /opt/dremio/jars/
 ```
 
-### 10. `minReplicaCount: 0` vs `1`
+### 13. `minReplicaCount: 0` vs `1`
 
 | Setting | Pros | Cons |
 |---------|------|------|
@@ -433,3 +461,6 @@ kubectl create secret generic nessie-token-rotator-secret \
 | S3/object storage access denied | Configure `core-site.xml` in executor ConfigMaps with appropriate credential provider |
 | PVC provision failures | Verify `storageClassName` matches your platform's available storage classes |
 | Executor pod evicted for ephemeral storage | Increase `ephemeral-storage` limits (15Gi/30Gi for small, 30Gi/60Gi for large); set `whenScaled: Delete` on PVC retention policy (see Pitfalls #6 and #7) |
+| Executor evicted but `df` shows only ~1GB used | Eviction is from log flood, not disk writes — check `kubectl get --raw .../stats/summary` for `logs usedBytes`; ensure executor ConfigMaps include `logback.xml` with `io.netty` at WARN (see Pitfall #10) |
+| Exporter OOMKilled | Exporter is fetching all historical jobs; upgrade to `2026.05.8`+ which stops pagination early (see Pitfall #9) |
+| KEDA sees `executor_desired=0`, won't scale up | Exporter may be mid-pagination returning stale cache; upgrade to `2026.05.8`+ or reduce `MAX_JOB_PAGES` |

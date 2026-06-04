@@ -90,6 +90,8 @@ kubectl create secret generic dremio-ops-credentials \
 
 ## Deployment
 
+> **Before deploying:** The YAML manifests contain hardcoded values for `storageClassName`, `nodeSelector`, and image tags that are specific to the reference environment. Edit these to match your platform before running `deploy.sh`. See [Platform Customization](#platform-customization) for details.
+
 ```bash
 cd k8s
 export GHCR_USERNAME=<your-registry-username>
@@ -110,14 +112,33 @@ The manifests in this repo are configured for a specific environment. Before dep
 
 ### Storage Class
 
-Executor StatefulSets use `volumeClaimTemplates` for persistent data. Set `storageClassName` to match your platform:
+All PVCs and `volumeClaimTemplates` in these manifests use `storageClassName: longhorn`. **You must change this** to a storage class available on your cluster before deploying.
 
-| Platform | Storage Class |
-|----------|--------------|
-| EKS (AWS) | `gp3` |
-| GKE (GCP) | `standard` or `premium-rwo` |
-| AKS (Azure) | `azurefile` or `managed-premium` |
-| k3s with Longhorn | `longhorn` |
+List available storage classes on your cluster:
+```bash
+kubectl get storageclass
+```
+
+Common defaults by platform:
+
+| Platform | Storage Class | Notes |
+|----------|--------------|-------|
+| EKS (AWS) | `gp3` | Requires [EBS CSI driver](https://docs.aws.amazon.com/eks/latest/userguide/ebs-csi.html) |
+| GKE (GCP) | `standard` or `premium-rwo` | `premium-rwo` uses SSD-backed PDs |
+| AKS (Azure) | `azurefile` or `managed-premium` | `azurefile` supports ReadWriteMany |
+| k3s with Longhorn | `longhorn` | Default if Longhorn is installed |
+| On-prem / bare-metal | Depends on provisioner | May be `local-path`, `openebs-hostpath`, etc. |
+
+Files that contain `storageClassName` you need to update:
+
+| File | Resource | Default |
+|------|----------|---------|
+| `00b-coordinator-pvc.yaml` | Coordinator data PVC | `longhorn` |
+| `00c-dist-pvc.yaml` | Shared distribution PVC | `longhorn` |
+| `12-executor-small.yaml` | Small executor `volumeClaimTemplates` | `longhorn` |
+| `13-executor-large.yaml` | Large executor `volumeClaimTemplates` | `longhorn` |
+
+> **Note:** The distribution PVC (`00c-dist-pvc.yaml`) uses `ReadWriteMany` access mode. Make sure your storage class supports it (Longhorn, EFS, Azure Files, NFS). EBS `gp3` only supports `ReadWriteOnce`.
 
 ### S3 / Object Storage Credentials
 
@@ -151,11 +172,15 @@ nodeSelector:
 
 ### Spill and Cache Paths
 
-| Tier | Spill Path | Cache Path | Storage |
-|------|-----------|------------|---------|
-| Small (PVC) | `/opt/dremio/data/spill` | `/opt/dremio/data/cm/fs/*` | Longhorn PVC (30Gi) |
-| Large (PVC) | `/opt/dremio/data/spill` | `/opt/dremio/data/cm/fs/*` | Longhorn PVC (100Gi) |
+| Tier | Spill Path | Cache Path | PVC Size |
+|------|-----------|------------|-----------|
+| Small | `/opt/dremio/data/spill` | `/opt/dremio/data/cm/fs/*` | 30Gi minimum |
+| Large | `/opt/dremio/data/spill` | `/opt/dremio/data/cm/fs/*` | 100Gi minimum |
 | Large (NVMe) | `/mnt/nvme/spill` | `/mnt/nvme/cache/*` | `hostPath` or local PV |
+
+> **Sizing guidance:** The column cache (`/opt/dremio/data/cm/fs/`) grows with the amount of data queried. 30Gi is a reasonable starting point for small executors, but monitor PVC usage and increase if cache eviction appears in logs. Large executors working on bigger datasets may need 100Gi or more.
+
+> **Important:** All these paths use PVCs backed by the storage class you configure (see [Storage Class](#storage-class) above). The `storageClassName` in `volumeClaimTemplates` must match your cluster's provisioner.
 
 ## Pitfalls & Lessons Learned
 
@@ -235,8 +260,10 @@ volumeClaimTemplates:
       resources:
         requests:
           storage: 30Gi
-      storageClassName: longhorn
+      storageClassName: <your-storage-class>   # e.g. gp3, standard, longhorn
 ```
+
+> **Platform note:** Set `storageClassName` to the default provisioner on your cluster (`gp3` on EKS, `standard` on GKE, `longhorn` on k3s). Run `kubectl get storageclass` to see available options.
 
 ### 7. `minReplicaCount: 0` vs `1`
 

@@ -16,11 +16,13 @@
 package com.dremio.resource.elastic;
 
 import com.dremio.service.coordinator.ListenableSet;
+import com.dremio.telemetry.api.metrics.MeterProviders;
 import io.fabric8.kubernetes.api.model.apps.StatefulSet;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,6 +53,8 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   private final ListenableSet executorSet;
   private final int maxExecutorsSmall;
   private final int maxExecutorsLarge;
+  private final AtomicInteger desiredSmall = new AtomicInteger(0);
+  private final AtomicInteger desiredLarge = new AtomicInteger(0);
 
   public K8sPlatform(
       KubernetesClient k8sClient,
@@ -67,6 +71,14 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
     this.executorSet = executorSet;
     this.maxExecutorsSmall = maxExecutorsSmall;
     this.maxExecutorsLarge = maxExecutorsLarge;
+    MeterProviders.newGauge(
+        "elastic_desired_small",
+        "Desired small executor replicas as requested by ElasticResourceAllocator",
+        desiredSmall::get);
+    MeterProviders.newGauge(
+        "elastic_desired_large",
+        "Desired large executor replicas as requested by ElasticResourceAllocator",
+        desiredLarge::get);
   }
 
   @Override
@@ -174,36 +186,19 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
           currentReplicas,
           newReplicas);
 
-      // Write annotations to signal the exporter and KEDA the desired replica count.
-      // KEDA is the sole authority on spec.replicas — we do NOT write spec.replicas directly
-      // to avoid the race where KEDA overrides our value before the exporter has refreshed.
-      // The exporter reads scale-requested-count and propagates it as desired_large=N,
-      // causing KEDA to set spec.replicas=N on its next poll cycle.
-      final String atKey = "dremio.io/scale-requested-at";
-      final String atValue = String.valueOf(System.currentTimeMillis());
-      final String countKey = "dremio.io/scale-requested-count";
-      final String countValue = String.valueOf(newReplicas);
-      k8sClient
-          .apps()
-          .statefulSets()
-          .inNamespace(namespace)
-          .withName(deploymentName)
-          .edit(
-              s -> {
-                java.util.Map<String, String> ann =
-                    s.getMetadata().getAnnotations() == null
-                        ? new java.util.HashMap<>()
-                        : new java.util.HashMap<>(s.getMetadata().getAnnotations());
-                ann.put(atKey, atValue);
-                ann.put(countKey, countValue);
-                s.getMetadata().setAnnotations(ann);
-                return s;
-              });
+      // Publish desired replica count as a Prometheus gauge. The KEDA metrics exporter
+      // reads elastic_desired_small/large from the coordinator liveness endpoint and
+      // propagates them to KEDA, which then sets .spec.replicas on the StatefulSet.
+      if (deploymentName.equals(deploymentNameSmall)) {
+        desiredSmall.set(newReplicas);
+      } else {
+        desiredLarge.set(newReplicas);
+      }
 
       logger.info(
-          "Signalled desired {} replicas via annotations for {} (KEDA will apply)",
-          newReplicas,
-          deploymentName);
+          "Published elastic_desired_{}={} to Prometheus (KEDA exporter will apply via KEDA)",
+          deploymentName.equals(deploymentNameSmall) ? "small" : "large",
+          newReplicas);
 
       return true;
     } catch (Exception e) {

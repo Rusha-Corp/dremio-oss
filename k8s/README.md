@@ -1,9 +1,23 @@
-# Dremio K8s Elastic Scaling Deployment
+# Dremio K8s Elastic Scaling — k3s Playground
 
 ## Overview
-Deployment manifests for Dremio with elastic executor scaling on Kubernetes, using KEDA for autoscaling. The executor tiers (small/large) scale from zero based on query demand and scale down when idle.
 
-> **Note:** These manifests are reference configurations. You **must** customize storage classes, node placement, credentials, and distribution paths for your specific platform (EKS, GKE, AKS, k3s, etc.) before deploying. See [Platform Customization](#platform-customization) below.
+This is our k3s playground for testing Dremio elastic executor scaling with KEDA autoscaling. The manifests are configured for our specific environment (k3s + Longhorn on a single Contabo node), but the **pitfalls and lessons learned documented here apply to any Dremio elastic scaling deployment on Kubernetes**.
+
+The executor tiers (small/large) scale from zero based on query demand and scale down when idle. A metrics exporter bridges Dremio's `ElasticResourceAllocator` with KEDA to drive scaling decisions.
+
+## What's Running
+
+| Component | Version / Config |
+|-----------|-----------------|
+| Kubernetes | k3s on a single node (`vmi1594378.contaboserver.net`) |
+| Storage | Longhorn (all PVCs use `storageClassName: longhorn`) |
+| Dremio OSS | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` |
+| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.6` |
+| KEDA | v2.x operator installed on cluster |
+| Coordinator | 1 pod, 4Gi heap |
+| Small executors | KEDA-managed StatefulSet, 4Gi heap, 30Gi data PVC |
+| Large executors | KEDA-managed StatefulSet, 14Gi heap, 100Gi data PVC |
 
 ## Images
 
@@ -12,25 +26,18 @@ Deployment manifests for Dremio with elastic executor scaling on Kubernetes, usi
 | Dremio OSS (coordinator + executor) | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` | Single binary; role determined by ConfigMap |
 | KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.6` | [github.com/Rusha-Corp/dremio-keda-exporter](https://github.com/Rusha-Corp/dremio-keda-exporter) |
 
-## Prerequisites
-1. Kubernetes cluster (1.24+) with KEDA operator installed
-2. Container registry access (GHCR or private)
-3. Persistent storage provisioner (Longhorn, EBS CSI, etc.)
-4. Environment variables for deploy.sh:
-   - `GHCR_USERNAME` — registry username
-   - `GHCR_TOKEN` — registry personal access token
-
 ## Manifests
+
 | File | Description |
 |------|-------------|
 | `00-namespace.yaml` | Namespace definition |
-| `00b-coordinator-pvc.yaml` | Coordinator persistent volume claim |
-| `00c-dist-pvc.yaml` | Shared distribution PVC |
-| `01-rbac.yaml` | Service accounts, Roles, and ClusterRoleBindings |
+| `00b-coordinator-pvc.yaml` | Coordinator data PVC (Longhorn) |
+| `00c-dist-pvc.yaml` | Shared distribution PVC (Longhorn, ReadWriteMany) |
+| `01-rbac.yaml` | Service accounts, Roles, ClusterRoleBindings |
 | `02-service.yaml` | Headless service for coordinator pod DNS |
 | `02b-executor-service.yaml` | Headless service for executor pod DNS |
 | `03-configmap.yaml` | Dremio coordinator configuration |
-| `04-coordinator.yaml` | Coordinator deployment definition |
+| `04-coordinator.yaml` | Coordinator deployment |
 | `05-ingress-tcp-flight.yaml` | TCP ingress for Flight SQL |
 | `05-service-ingress.yaml` | ClusterIP service for coordinator UI |
 | `06-ingress.yaml` | HTTP ingress for coordinator UI |
@@ -40,10 +47,10 @@ Deployment manifests for Dremio with elastic executor scaling on Kubernetes, usi
 | `09-metrics-exporter-deployment.yaml` | Metrics exporter deployment + service |
 | `10-configmap-executor-small.yaml` | Small executor Dremio config |
 | `10-configmap-executor-large.yaml` | Large executor Dremio config |
-| `12-executor-small.yaml` | Small executor StatefulSet |
-| `13-executor-large.yaml` | Large executor StatefulSet |
-| `build-and-push.sh` | Build and push Docker image to registry |
-| `Dockerfile` | Multi-stage Dockerfile for Dremio OSS image |
+| `12-executor-small.yaml` | Small executor StatefulSet (30Gi data PVC) |
+| `13-executor-large.yaml` | Large executor StatefulSet (100Gi data PVC) |
+| `build-and-push.sh` | Build and push Docker image to GHCR |
+| `Dockerfile` | Dockerfile for Dremio OSS image |
 | `deploy.sh` | Deployment script with envsubst |
 | `services/nessie-token-rotator/` | Nessie catalog token rotation CronJob |
 
@@ -90,7 +97,7 @@ kubectl create secret generic dremio-ops-credentials \
 
 ## Deployment
 
-> **Before deploying:** The YAML manifests contain hardcoded values for `storageClassName`, `nodeSelector`, and image tags that are specific to the reference environment. Edit these to match your platform before running `deploy.sh`. See [Platform Customization](#platform-customization) for details.
+These manifests are configured for our k3s/Longhorn environment. If you're deploying on a different platform, see [Adapting for Other Platforms](#adapting-for-other-platforms).
 
 ```bash
 cd k8s
@@ -106,20 +113,17 @@ kubectl get pods -n dremio
 kubectl logs dremio-coordinator-0 -n dremio
 ```
 
-## Platform Customization
+## Adapting for Other Platforms
 
-The manifests in this repo are configured for a specific environment. Before deploying to a different platform, you **must** review and update:
+These manifests are configured for k3s with Longhorn storage. If you want to deploy Dremio elastic scaling on EKS, GKE, AKS, or another K8s platform, here's what to change:
 
 ### Storage Class
 
-All PVCs and `volumeClaimTemplates` in these manifests use `storageClassName: longhorn`. **You must change this** to a storage class available on your cluster before deploying.
+All PVCs and `volumeClaimTemplates` use `storageClassName: longhorn`. Replace this with your platform's storage class:
 
-List available storage classes on your cluster:
 ```bash
 kubectl get storageclass
 ```
-
-Common defaults by platform:
 
 | Platform | Storage Class | Notes |
 |----------|--------------|-------|
@@ -129,16 +133,16 @@ Common defaults by platform:
 | k3s with Longhorn | `longhorn` | Default if Longhorn is installed |
 | On-prem / bare-metal | Depends on provisioner | May be `local-path`, `openebs-hostpath`, etc. |
 
-Files that contain `storageClassName` you need to update:
+Files that contain `storageClassName`:
 
-| File | Resource | Default |
-|------|----------|---------|
+| File | Resource | Current Value |
+|------|----------|---------------|
 | `00b-coordinator-pvc.yaml` | Coordinator data PVC | `longhorn` |
 | `00c-dist-pvc.yaml` | Shared distribution PVC | `longhorn` |
 | `12-executor-small.yaml` | Small executor `volumeClaimTemplates` | `longhorn` |
 | `13-executor-large.yaml` | Large executor `volumeClaimTemplates` | `longhorn` |
 
-> **Note:** The distribution PVC (`00c-dist-pvc.yaml`) uses `ReadWriteMany` access mode. Make sure your storage class supports it (Longhorn, EFS, Azure Files, NFS). EBS `gp3` only supports `ReadWriteOnce`.
+> **Note:** The distribution PVC (`00c-dist-pvc.yaml`) uses `ReadWriteMany` access mode. Make sure your storage class supports it (Longhorn, EFS, Azure Files, NFS). EBS `gp3` only supports `ReadWriteOnce` — use EFS or an S3 dist path instead.
 
 ### S3 / Object Storage Credentials
 
@@ -160,12 +164,14 @@ Executors need access to your distribution bucket. Configure `core-site.xml` in 
 
 ### Node Placement
 
-Replace the hardcoded `nodeSelector` with role-based labels for your cluster:
+Our manifests use a hardcoded `nodeSelector` for the single-node playground:
 ```yaml
-# Instead of:
 nodeSelector:
   kubernetes.io/hostname: vmi1594378.contaboserver.net
-# Use:
+```
+
+Replace with role-based labels for a multi-node cluster:
+```yaml
 nodeSelector:
   role: dremio-executor
 ```
@@ -178,11 +184,11 @@ nodeSelector:
 | Large | `/opt/dremio/data/spill` | `/opt/dremio/data/cm/fs/*` | 100Gi minimum |
 | Large (NVMe) | `/mnt/nvme/spill` | `/mnt/nvme/cache/*` | `hostPath` or local PV |
 
-> **Sizing guidance:** The column cache (`/opt/dremio/data/cm/fs/`) grows with the amount of data queried. 30Gi is a reasonable starting point for small executors, but monitor PVC usage and increase if cache eviction appears in logs. Large executors working on bigger datasets may need 100Gi or more.
-
-> **Important:** All these paths use PVCs backed by the storage class you configure (see [Storage Class](#storage-class) above). The `storageClassName` in `volumeClaimTemplates` must match your cluster's provisioner.
+> **Sizing guidance:** The column cache (`/opt/dremio/data/cm/fs/`) grows with the amount of data queried. 30Gi is a reasonable starting point for small executors, but monitor PVC usage and increase if cache eviction appears in logs. Large executors working on bigger datasets may need 100Gi or more. On our playground, we observed the large executor cache reaching 29GB.
 
 ## Pitfalls & Lessons Learned
+
+These are real issues we hit during testing on our k3s playground. They apply broadly to any Dremio elastic scaling deployment on Kubernetes — especially the ephemeral storage eviction and probe pitfalls, which are easy to miss.
 
 ### 1. KEDA `maxReplicaCount` Too Low Causes Query Stampedes
 
@@ -236,12 +242,12 @@ The default KEDA `cooldownPeriod` of 1800s (30 min) and `stabilizationWindowSeco
 
 ### 6. Ephemeral Storage Eviction Kills Executors (No PVC for `/opt/dremio/data`)
 
-**Symptom:** `ExecutionSetupException: One or more nodes lost connectivity during query. Identified nodes were [10.42.x.x:0]`. Small executor pods are repeatedly evicted with `Pod ephemeral local storage usage exceeds the total limit of containers 10Gi`.
+**Symptom:** `ExecutionSetupException: One or more nodes lost connectivity during query. Identified nodes were [10.42.x.x:0]`. Executor pods are repeatedly evicted with `Pod ephemeral local storage usage exceeds the total limit of containers 10Gi`.
 
 **Root cause:** When `executor.cache.enabled: true` (which is the default), Dremio writes column cache data to `/opt/dremio/data/cm/fs/`. Without a PVC for `/opt/dremio/data`, this data goes to the container's writable overlay layer, which counts against the `ephemeral-storage` limit. Once cache grows past 10Gi, the Kubelet evicts the pod mid-query, causing the coordinator to see the node as disconnected.
 
-**Evidence:**
-- Large executor: 29GB of column cache data, but has a 100Gi Longhorn PVC → no eviction
+**Evidence from our playground:**
+- Large executor: 29GB of column cache data, but has a 100Gi PVC → no eviction
 - Small executor: No PVC for `/opt/dremio/data` → data in overlay → eviction at 10Gi limit
 - K8s events: `Pod ephemeral local storage usage exceeds the total limit`
 - `preStop: sleep 120` hook fails during eviction → no graceful shutdown
@@ -272,9 +278,7 @@ volumeClaimTemplates:
 | `minReplicaCount: 0` | No cost when idle | 30–90s cold start on first query |
 | `minReplicaCount: 1` | Always warm, instant response | Continuous cost even when idle |
 
-## Additional K8s Resources
-
-### Executor JVM Memory Configuration
+## Executor JVM Memory Configuration
 
 Executors **must** have `DREMIO_MAX_MEMORY_SIZE_MB` set to prevent OOMKills. Dremio's startup script calculates `-Xmx` and `-XX:MaxDirectMemorySize` from this value.
 
@@ -285,7 +289,7 @@ Executors **must** have `DREMIO_MAX_MEMORY_SIZE_MB` set to prevent OOMKills. Dre
 | small | 4Gi | 8Gi | 4096 |
 | large | 8Gi | 16Gi | 14336 |
 
-### Nessie Token Rotation
+## Nessie Token Rotation
 
 The `services/nessie-token-rotator/` directory contains a CronJob that refreshes the Cognito OAuth2 bearer token for the Nessie catalog source in Dremio.
 
@@ -313,3 +317,4 @@ kubectl create secret generic nessie-token-rotator-secret \
 | Cold-start delays (30–90s) | Expected; reduce `cooldownPeriod` and `stabilizationWindowSeconds` for faster scale-up |
 | S3/object storage access denied | Configure `core-site.xml` in executor ConfigMaps with appropriate credential provider |
 | PVC provision failures | Verify `storageClassName` matches your platform's available storage classes |
+| Executor pod evicted for ephemeral storage | Add PVC for `/opt/dremio/data` via `volumeClaimTemplates` (see Pitfall #6) |

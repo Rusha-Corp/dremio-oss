@@ -59,32 +59,43 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 KEDA scales executors based on metrics from the `dremio-keda-exporter` sidecar. The flow is:
 
 ```
-┌─────────────┐  polls /apiv2/jobs   ┌──────────────────────┐
-│   Dremio     │◄──────────────────────│  metrics-exporter    │
-│  Coordinator │                        │  (:5001/json)        │
-└──────┬──────┘                        └──────────┬───────────┘
-       │                                          │
-       │ reads StatefulSet annotations             │ exposes metrics
-       │ set by ElasticResourceAllocator           │ executor_desired_small
-       │                                          │ executor_desired_large
-       │                                          │
-┌──────┴──────┐                           ┌──────┴───────────┐
-│   K8s API   │                           │  KEDA Controller  │
-│  StatefulSets│                          │  polls :5001/json │
-└─────────────┘                           └──────┬───────────┘
-                                                  │
-                                           scales StatefulSets
-                                                  │
-                                          ┌───────┴────────┐
-                                          │  Executor Pods  │
-                                          │  (small / large)│
-                                          └────────────────┘
+┌──────────────────────────────────────────────┐
+│           Dremio Coordinator                  │
+│                                               │
+│  ElasticResourceAllocator                     │
+│  - query arrives → compute required executors │
+│  - scaleExecutors(delta, tier)                │
+│  - publishes elastic_desired_small/large      │
+│    as Prometheus gauges on :45679/metrics     │
+└───────────────────┬──────────────────────────┘
+                    │ :45679/metrics
+                    ▼
+         ┌──────────────────────┐
+         │  metrics-exporter    │  polls /apiv2/jobs every 5s
+         │  - reads             │◄─────────────────────────────
+         │    elastic_desired_* │
+         │  - applies scale-    │
+         │    gate logic        │
+         │  - exposes           │
+         │    executor_desired_*│
+         └──────────┬───────────┘
+                    │ :5001/json
+                    ▼
+         ┌──────────────────────┐
+         │   KEDA Controller    │  polls every 10s
+         └──────────┬───────────┘
+                    │ sets .spec.replicas
+                    ▼
+         ┌──────────────────────┐
+         │  Executor StatefulSets│
+         │  (small / large)      │
+         └──────────────────────┘
 ```
 
-1. The **metrics exporter** pod polls Dremio's `/apiv2/jobs` API every 5s for active/queued jobs (all pages)
-2. It reads the current StatefulSet replica counts via the Kubernetes API
-3. It computes `executor_desired_small` and `executor_desired_large` using the scale-gate logic below
-4. **KEDA** polls `:5001/json` every 10s and scales the StatefulSets up/down accordingly
+1. The **coordinator** (`ElasticResourceAllocator`) evaluates each query's resource needs and calls `scaleExecutors(delta, tier)` when more executors are needed. `K8sPlatform` publishes the desired count as Prometheus gauges `elastic_desired_small` / `elastic_desired_large` on the liveness endpoint (`:45679/metrics`). This keeps the exporter fully decoupled from Kubernetes.
+2. The **metrics exporter** polls Dremio's `/apiv2/jobs` API every 5s (all pages) and reads `elastic_desired_*` from the liveness endpoint.
+3. It computes `executor_desired_small` and `executor_desired_large` using the scale-gate logic below.
+4. **KEDA** polls `:5001/json` every 10s and scales the StatefulSets up/down accordingly.
 
 ### Scale-gate logic
 
@@ -119,6 +130,35 @@ kubectl create secret generic dremio-ops-credentials \
   --from-literal=DREMIO_USERNAME=<admin-username> \
   --from-literal=DREMIO_PASSWORD=<admin-password>
 ```
+
+## Building the Image
+
+The Dremio image is built from the existing distribution tarball with freshly compiled JARs overlaid on top. This avoids a full Maven build (~15 min) for each change.
+
+**Workflow for Java changes** (e.g., `K8sPlatform.java`, `dremio-reference.conf`):
+
+```bash
+# 1. Compile only the changed modules
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+./mvnw package -pl common/legacy,services/resourcescheduler \
+  -DskipTests -Denforcer.skip=true -Derrorprone.skip=true -q
+
+# 2. Stage the JARs into the Docker build context
+cp common/legacy/target/dremio-common-*.jar k8s/
+cp services/resourcescheduler/target/dremio-services-resourcescheduler-*.jar k8s/
+
+# 3. Build and push
+cd k8s && bash build-and-push.sh
+```
+
+The `Dockerfile` copies the staged JARs on top of the tarball at image build time:
+```dockerfile
+COPY dremio-common-26.0.5-...jar /opt/dremio/jars/
+COPY dremio-services-execselector-26.0.5-...jar /opt/dremio/jars/
+COPY dremio-services-resourcescheduler-26.0.5-...jar /opt/dremio/jars/
+```
+
+> **Note:** `dremio-common` must be copied whenever `dremio-reference.conf` is changed — it is bundled inside that JAR.
 
 ## Deployment
 
@@ -327,7 +367,26 @@ else:
 
 This is fixed in `dremio-keda-exporter:2026.05.7`.
 
-### 9. `minReplicaCount: 0` vs `1`
+### 9. New `DremioConfig` keys must be added to `dremio-reference.conf`
+
+**Symptom:** Coordinator crashes at startup with:
+```
+java.lang.RuntimeException: Failure reading configuration file. The following properties were invalid:
+    services.executor.elastic.kubernetes.pod_template_large
+    services.executor.elastic.max_executors_large
+```
+
+**Root cause:** `DremioConfig.checkForInvalidPaths()` validates every config key used in code against `dremio-reference.conf`. Any key not present in the reference conf causes a hard startup failure — even if the key has a default value.
+
+**Fix:** Add the new key with a default value to `dremio-reference.conf` in the correct HOCON path, then rebuild the image. Because `dremio-reference.conf` is bundled inside `dremio-common-*.jar`, the Docker build must also copy a freshly compiled `dremio-common-*.jar` on top of the distribution tarball:
+
+```dockerfile
+# In k8s/Dockerfile — after extracting the distribution tarball:
+COPY dremio-common-26.0.5-...jar /opt/dremio/jars/
+COPY dremio-services-resourcescheduler-26.0.5-...jar /opt/dremio/jars/
+```
+
+### 10. `minReplicaCount: 0` vs `1`
 
 | Setting | Pros | Cons |
 |---------|------|------|

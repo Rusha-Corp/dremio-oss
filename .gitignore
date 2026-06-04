@@ -1,7 +1,6 @@
 #ignore all folders that start with period
 .*/
 !.mvn/
-k8s/
 .buildpath
 .checkstyle
 .classpath
@@ -45,7 +44,5 @@ run-test.sh
 /dremio-reference.conf
 plan/
 
-# Deployment manifests and docs — not part of the codebase
-k8s/
-docs/
-ELASTIC_SCALING_IMPLEMENTATION.md
+# Secrets - never commit
+k8s/services/nessie-token-rotator/secret.yaml

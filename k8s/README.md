@@ -286,7 +286,7 @@ Executors **must** have `DREMIO_MAX_MEMORY_SIZE_MB` set to prevent OOMKills. Dre
 
 | Tier | Memory Request | Memory Limit | DREMIO_MAX_MEMORY_SIZE_MB |
 |------|----------------|--------------|---------------------------|
-| small | 4Gi | 8Gi | 4096 |
+| small | 4Gi | 8Gi | 6144 |
 | large | 8Gi | 16Gi | 14336 |
 
 ## Nessie Token Rotation

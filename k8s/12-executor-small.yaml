@@ -37,7 +37,7 @@ spec:
                 fieldRef:
                   fieldPath: status.podIP
             - name: DREMIO_MAX_MEMORY_SIZE_MB
-              value: "4096"
+              value: "6144"
           lifecycle:
             preStop:
               exec:

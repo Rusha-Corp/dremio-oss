@@ -10,7 +10,7 @@ metadata:
 spec:
   persistentVolumeClaimRetentionPolicy:
     whenDeleted: Retain
-    whenScaled: Retain
+    whenScaled: Delete
   replicas: 0
   selector:
     matchLabels:
@@ -64,11 +64,11 @@ spec:
           resources:
             limits:
               cpu: "4"
-              ephemeral-storage: 20Gi
+              ephemeral-storage: 60Gi
               memory: 16Gi
             requests:
               cpu: "2"
-              ephemeral-storage: 10Gi
+              ephemeral-storage: 30Gi
               memory: 8Gi
           securityContext:
             runAsGroup: 0

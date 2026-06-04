@@ -16,8 +16,8 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 | KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.6` |
 | KEDA | v2.x operator installed on cluster |
 | Coordinator | 1 pod, 4Gi heap |
-| Small executors | KEDA-managed StatefulSet, 4Gi heap, 30Gi data PVC |
-| Large executors | KEDA-managed StatefulSet, 14Gi heap, 100Gi data PVC |
+| Small executors | KEDA-managed StatefulSet, 4Gi heap, 15Gi/30Gi ephemeral-storage, 30Gi data PVC |
+| Large executors | KEDA-managed StatefulSet, 14Gi heap, 30Gi/60Gi ephemeral-storage, 100Gi data PVC |
 
 ## Images
 
@@ -240,38 +240,50 @@ The default KEDA `cooldownPeriod` of 1800s (30 min) and `stabilizationWindowSeco
 - `scaleDown.stabilizationWindowSeconds: 300` (5 min stability window)
 - `scaleUp.stabilizationWindowSeconds: 0` (scale up immediately)
 
-### 6. Ephemeral Storage Eviction Kills Executors (No PVC for `/opt/dremio/data`)
+### 6. Ephemeral Storage Eviction Kills Executors
 
-**Symptom:** `ExecutionSetupException: One or more nodes lost connectivity during query. Identified nodes were [10.42.x.x:0]`. Executor pods are repeatedly evicted with `Pod ephemeral local storage usage exceeds the total limit of containers 10Gi`.
+**Symptom:** `ExecutionSetupException: One or more nodes lost connectivity during query. Identified nodes were [10.42.x.x:0]`. Executor pods are repeatedly evicted with `Pod ephemeral local storage usage exceeds the total limit of containers`.
 
-**Root cause:** When `executor.cache.enabled: true` (which is the default), Dremio writes column cache data to `/opt/dremio/data/cm/fs/`. Without a PVC for `/opt/dremio/data`, this data goes to the container's writable overlay layer, which counts against the `ephemeral-storage` limit. Once cache grows past 10Gi, the Kubelet evicts the pod mid-query, causing the coordinator to see the node as disconnected.
+**Root cause:** Dremio executors write working data (JAR extractions, native libraries in `/tmp`, query spill, logs) to the container's writable overlay layer. Even though `/opt/dremio/data` is on a PVC (and therefore excluded from ephemeral storage accounting), the overlay layer accumulates ~1GB+ of runtime artifacts. When the container's `ephemeral-storage` limit is set too low (e.g. the original `10Gi` for small executors), the Kubelet evicts the pod mid-query.
 
-**Evidence from our playground:**
-- Large executor: 29GB of column cache data, but has a 100Gi PVC → no eviction
-- Small executor: No PVC for `/opt/dremio/data` → data in overlay → eviction at 10Gi limit
-- K8s events: `Pod ephemeral local storage usage exceeds the total limit`
-- `preStop: sleep 120` hook fails during eviction → no graceful shutdown
+On our playground we observed:
+- K8s events: `Pod ephemeral local storage usage exceeds the total limit of containers 10Gi`
+- `preStop: sleep 120` hook fails during eviction — no graceful shutdown
+- Executors enter a crash loop: evicted → recreated → eviction repeats
 
-**Fix:** Add a `volumeClaimTemplates` entry for `/opt/dremio/data` in the StatefulSet (same pattern as the large executor):
+**Fix:** Increase `ephemeral-storage` limits in the executor StatefulSet to provide adequate headroom:
+
+| Tier | Requests | Limits |
+|------|----------|--------|
+| Small | `15Gi` | `30Gi` |
+| Large | `30Gi` | `60Gi` |
+
 ```yaml
-volumeMounts:
-  - mountPath: /opt/dremio/data
-    name: dremio-local
-# ...
-volumeClaimTemplates:
-  - metadata:
-      name: dremio-local
-    spec:
-      accessModes: [ReadWriteOnce]
-      resources:
-        requests:
-          storage: 30Gi
-      storageClassName: <your-storage-class>   # e.g. gp3, standard, longhorn
+resources:
+  limits:
+    ephemeral-storage: 30Gi   # was 10Gi
+  requests:
+    ephemeral-storage: 15Gi   # was 5Gi
 ```
 
-> **Platform note:** Set `storageClassName` to the default provisioner on your cluster (`gp3` on EKS, `standard` on GKE, `longhorn` on k3s). Run `kubectl get storageclass` to see available options.
+### 7. PVC Retention Policy Matters for Elastic Scaling
 
-### 7. `minReplicaCount: 0` vs `1`
+**Symptom:** Orphaned PVCs accumulate in the cluster after KEDA scales executors down. Old cache data (8GB+) persists on PVCs that are never reused, wasting storage.
+
+**Root cause:** The default StatefulSet `persistentVolumeClaimRetentionPolicy` is `whenScaled: Retain`. When KEDA scales an executor from N replicas to 0, the PVCs are kept. When a new pod is later created, it gets a brand-new PVC anyway (because the pod ordinal may differ or the StatefulSet was scaled to 0 first). The old PVCs become orphans consuming hundreds of GB of storage.
+
+**Fix:** Set `whenScaled: Delete` so PVCs are cleaned up when replicas are reduced:
+
+```yaml
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain   # keep if StatefulSet is deleted (safety net)
+    whenScaled: Delete     # clean up PVCs when KEDA scales down
+```
+
+> **Note:** With `whenScaled: Delete`, PVCs are deleted when the replica count decreases. This is correct for elastic executors because the cache rebuilds from scratch on scale-up anyway. Do NOT use this for the coordinator or any stateful workload where data persistence matters.
+
+### 8. `minReplicaCount: 0` vs `1`
 
 | Setting | Pros | Cons |
 |---------|------|------|
@@ -284,10 +296,10 @@ Executors **must** have `DREMIO_MAX_MEMORY_SIZE_MB` set to prevent OOMKills. Dre
 
 > **Warning:** Do NOT use `DREMIO_JAVA_OPTS` for heap settings. The Dremio startup script overrides `-Xmx` and `-XX:MaxDirectMemorySize` based on `DREMIO_MAX_MEMORY_SIZE_MB`.
 
-| Tier | Memory Request | Memory Limit | DREMIO_MAX_MEMORY_SIZE_MB |
-|------|----------------|--------------|---------------------------|
-| small | 4Gi | 8Gi | 6144 |
-| large | 8Gi | 16Gi | 14336 |
+| Tier | Memory Request | Memory Limit | DREMIO_MAX_MEMORY_SIZE_MB | Ephemeral-Storage Request | Ephemeral-Storage Limit |
+|------|----------------|--------------|---------------------------|--------------------------|------------------------|
+| small | 4Gi | 8Gi | 6144 | 15Gi | 30Gi |
+| large | 8Gi | 16Gi | 14336 | 30Gi | 60Gi |
 
 ## Nessie Token Rotation
 
@@ -317,4 +329,4 @@ kubectl create secret generic nessie-token-rotator-secret \
 | Cold-start delays (30–90s) | Expected; reduce `cooldownPeriod` and `stabilizationWindowSeconds` for faster scale-up |
 | S3/object storage access denied | Configure `core-site.xml` in executor ConfigMaps with appropriate credential provider |
 | PVC provision failures | Verify `storageClassName` matches your platform's available storage classes |
-| Executor pod evicted for ephemeral storage | Add PVC for `/opt/dremio/data` via `volumeClaimTemplates` (see Pitfall #6) |
+| Executor pod evicted for ephemeral storage | Increase `ephemeral-storage` limits (15Gi/30Gi for small, 30Gi/60Gi for large); set `whenScaled: Delete` on PVC retention policy (see Pitfalls #6 and #7) |

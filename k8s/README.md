@@ -13,7 +13,7 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 | Kubernetes | k3s on a single node (`vmi1594378.contaboserver.net`) |
 | Storage | Longhorn (all PVCs use `storageClassName: longhorn`) |
 | Dremio OSS | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` |
-| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.6` |
+| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.7` |
 | KEDA | v2.x operator installed on cluster |
 | Coordinator | 1 pod, 4Gi heap |
 | Small executors | KEDA-managed StatefulSet, 4Gi heap, 15Gi/30Gi ephemeral-storage, 30Gi data PVC |
@@ -24,7 +24,7 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 | Image | Registry URI | Source |
 |---|---|---|
 | Dremio OSS (coordinator + executor) | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` | Single binary; role determined by ConfigMap |
-| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.6` | [github.com/Rusha-Corp/dremio-keda-exporter](https://github.com/Rusha-Corp/dremio-keda-exporter) |
+| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.7` | [github.com/Rusha-Corp/dremio-keda-exporter](https://github.com/Rusha-Corp/dremio-keda-exporter) |
 
 ## Manifests
 
@@ -81,11 +81,36 @@ KEDA scales executors based on metrics from the `dremio-keda-exporter` sidecar. 
                                           └────────────────┘
 ```
 
-1. The **metrics exporter** pod polls Dremio's `/apiv2/jobs` API for active/queued jobs
-2. It reads `dremio.io/scale-requested-count` annotations on StatefulSets (set by Dremio's `ElasticResourceAllocator`)
-3. It computes `executor_desired_small` and `executor_desired_large` from job requirements vs current capacity
+1. The **metrics exporter** pod polls Dremio's `/apiv2/jobs` API every 5s for active/queued jobs (all pages)
+2. It reads the current StatefulSet replica counts via the Kubernetes API
+3. It computes `executor_desired_small` and `executor_desired_large` using the scale-gate logic below
 4. **KEDA** polls `:5001/json` every 10s and scales the StatefulSets up/down accordingly
-5. A **120s grace period** prevents premature scale-down of executors with in-flight queries
+
+### Scale-gate logic
+
+```
+if active jobs > 0:
+    hold at current replicas (never scale down during queries)
+elif idle < SCALE_DOWN_GRACE_SECS (default 1800s):
+    hold at current replicas (drain window)
+elif idle < SCALE_DOWN_GRACE_SECS + TERMINAL_DRAIN_SECS (default +120s):
+    hold at current replicas (terminal drain — matches preStop hook)
+else:
+    desired = 0  (scale to zero)
+```
+
+The **terminal drain period** (`TERMINAL_DRAIN_SECS=120`) matches the executor `preStop: sleep 120` hook. It adds a final buffer after the grace period expires, ensuring any in-flight query fragments complete before KEDA sends SIGTERM to executor pods. The timer resets immediately if new jobs are detected.
+
+### Exporter environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DREMIO_URL` | `http://dremio-coordinator...` | Coordinator REST API URL |
+| `DREMIO_USERNAME` | — | Admin account for job polling (from `dremio-ops-credentials`) |
+| `DREMIO_PASSWORD` | — | Admin account password |
+| `NAMESPACE` | `dremio` | Kubernetes namespace |
+| `SCALE_DOWN_GRACE_SECS` | `1800` | Idle seconds to hold executors after last query before scaling to zero |
+| `TERMINAL_DRAIN_SECS` | `120` | Additional hold after grace period for in-flight fragment drain |
 
 The metrics exporter requires `dremio-ops-credentials` secret:
 ```bash
@@ -283,7 +308,26 @@ spec:
 
 > **Note:** With `whenScaled: Delete`, PVCs are deleted when the replica count decreases. This is correct for elastic executors because the cache rebuilds from scratch on scale-up anyway. Do NOT use this for the coordinator or any stateful workload where data persistence matters.
 
-### 8. `minReplicaCount: 0` vs `1`
+### 8. Dremio's `/apiv2/jobs` Pagination URL Uses Wrong Path Prefix
+
+**Symptom:** Metrics exporter logs `WARNING Dremio unavailable: Expecting value: line 1 column 1 (char 0)` on every poll cycle. `registered_executors` shows 0. The exporter appears to work (still holds executor counts) but job detection is broken.
+
+**Root cause:** Dremio's `/apiv2/jobs` response includes a `"next"` field for pagination, but the path it returns uses `/jobs/?offset=N&limit=N` instead of `/apiv2/jobs?offset=N&limit=N`. If the exporter naively appends this path to the base URL, the resulting request hits the Dremio web UI (which returns HTML), and `json.loads(HTML)` fails with `Expecting value`.
+
+This only triggers when there are **100+ jobs in history** (i.e., the first page is full and a `"next"` link exists).
+
+**Fix:** Extract only the query string from `"next"` and append it to `/apiv2/jobs`:
+```python
+next_path = data.get("next")
+if next_path and "?" in next_path:
+    url = f"{base_url}/apiv2/jobs?{next_path.split('?', 1)[1]}"
+else:
+    url = None
+```
+
+This is fixed in `dremio-keda-exporter:2026.05.7`.
+
+### 9. `minReplicaCount: 0` vs `1`
 
 | Setting | Pros | Cons |
 |---------|------|------|

@@ -15,6 +15,7 @@ data:
       coordinator.master.embedded-zookeeper.enabled: true,
       coordinator.web.port: 9047,
       coordinator.web.auth.type: "internal",
+      flight.port: 32010,
       executor.enabled: false,
       executor.elastic.enabled: true,
       executor.elastic.min_executors: 0,

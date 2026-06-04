@@ -15,6 +15,9 @@ spec:
     - port: 2181
       targetPort: 2181
       name: zk
+    - port: 32010
+      targetPort: 32010
+      name: flight
   selector:
     app: dremio
     role: coordinator

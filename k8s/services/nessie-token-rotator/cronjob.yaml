@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nessie-token-rotator
+  namespace: dremio
+spec:
+  # Run once daily at midnight UTC. Cognito token TTL is 24h so daily rotation is sufficient.
+  schedule: "0 0 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 6
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: rotator
+              image: ghcr.io/rusha-corp/nessie-token-rotator:latest
+              imagePullPolicy: Always
+              envFrom:
+                - configMapRef:
+                    name: nessie-token-rotator-config
+                - secretRef:
+                    name: nessie-token-rotator-secret
+          imagePullSecrets:
+            - name: ghcr-secret

@@ -1,0 +1,35 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: dremio-executor-small
+  namespace: dremio
+spec:
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          policies:
+            - periodSeconds: 120
+              type: Pods
+              value: 1
+          stabilizationWindowSeconds: 300
+        scaleUp:
+          policies:
+            - periodSeconds: 30
+              type: Pods
+              value: 2
+          stabilizationWindowSeconds: 0
+  cooldownPeriod: 600
+  maxReplicaCount: 4
+  minReplicaCount: 0
+  pollingInterval: 10
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: dremio-executor-small
+  triggers:
+    - type: metrics-api
+      metadata:
+        url: "http://dremio-metrics-exporter.dremio.svc.cluster.local:5001/json"
+        valueLocation: "executor_desired_small"
+        targetValue: "1"

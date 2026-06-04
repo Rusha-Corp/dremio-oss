@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nessie-token-rotator-config
+  namespace: dremio
+data:
+  DREMIO_URL: "http://dremio-coordinator.dremio.svc.cluster.local:9047"
+  NESSIE_SOURCE_NAME: "nessiecatalog"
+  OAUTH2_TOKEN_ENDPOINT: "https://nessie-auth-dev-217493348668.auth.eu-west-2.amazoncognito.com/oauth2/token"
+  OAUTH2_CLIENT_ID: "58e72e88kc0utqqpj6qj9obq8a"
+  OAUTH2_SCOPE: "https://nessie/full"
+  OAUTH2_GRANT_TYPE: "client_credentials"
+  DREMIO_USERNAME: "emmanuel.davidson"
+  NESSIE_ENDPOINT: "https://nessie.tierravivaai.net/api/v2"
+  TOKEN_REFRESH_MARGIN: "300"

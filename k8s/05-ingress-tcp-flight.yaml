@@ -1,0 +1,13 @@
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: dremio-flight-tcp
+  namespace: dremio
+spec:
+  entryPoints:
+    - dremio-flight
+  routes:
+    - match: HostSNI(`*`)
+      services:
+        - name: dremio-coordinator
+          port: 32010

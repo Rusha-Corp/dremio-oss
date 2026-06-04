@@ -1,59 +1,45 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# ==============================================================================
+# Dremio elastic executor deployment script.
+# Review and customize storage classes, node selectors, and credentials
+# for your platform before deploying. See k8s/README.md for details.
+# ==============================================================================
 set -e
 
 NAMESPACE="dremio"
-REPO="${GHCR_REPO:-ghcr.io/rusha-corp/dremio-oss}"
-VERSION="${DREMIO_VERSION:-26.0.5-elastic}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-export GHCR_REPO="$REPO"
-export DREMIO_VERSION="$VERSION"
+GHCR_REGISTRY="ghcr.io/rusha-corp/dremio-oss"
 
 echo "=== Creating namespace and RBAC ==="
-kubectl apply -f "$SCRIPT_DIR/00-namespace.yaml"
-kubectl apply -f "$SCRIPT_DIR/01-rbac.yaml"
-
-echo "=== Creating shared dist PVC ==="
-kubectl apply -f "$SCRIPT_DIR/00c-dist-pvc.yaml"
+kubectl apply -f 00-namespace.yaml
 
 echo "=== Creating GHCR secret ==="
-if [ -n "${GHCR_TOKEN:-}" ]; then
-  kubectl create secret docker-registry ghcr-secret \
-    --docker-server=ghcr.io \
-    --docker-username="${GHCR_USERNAME:-}" \
-    --docker-password="$GHCR_TOKEN" \
-    --namespace=$NAMESPACE \
-    --dry-run=client -o yaml | kubectl apply -f -
-else
-  echo "WARNING: GHCR_TOKEN not set — skipping image pull secret creation"
-fi
+kubectl create secret docker-registry ghcr-secret \
+  --docker-server=ghcr.io \
+  --docker-username="$GHCR_USERNAME" \
+  --docker-password="$GHCR_TOKEN" \
+  --namespace=$NAMESPACE \
+  --dry-run=client -o yaml | kubectl apply -f -
 
-echo "=== Creating host directories on target node ==="
-TARGET_NODE="vmi1594378.contaboserver.net"
-for dir in /mnt/dremio/coordinator /mnt/dremio/dist; do
-  echo "  Ensuring $dir exists on $TARGET_NODE"
-  ssh "root@$TARGET_NODE" "mkdir -p $dir" 2>/dev/null || echo "  (skipped — assume directory exists or SSH not available)"
-done
+echo "=== Applying manifests ==="
+kubectl apply -f 01-rbac.yaml
+kubectl apply -f 02-service.yaml
+kubectl apply -f 03-configmap.yaml
+kubectl apply -f 04-coordinator.yaml
+kubectl apply -f 05-ingress-tcp-flight.yaml
 
-echo "=== Applying manifests (with env substitution) ==="
-envsubst < "$SCRIPT_DIR/02-service.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/02b-executor-service.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/03-configmap.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/04-coordinator.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/05-service-ingress.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/06-ingress.yaml" | kubectl apply -f -
-# envsubst < "$SCRIPT_DIR/07-hpa.yaml" | kubectl apply -f -  # Replaced by KEDA ScaledObject
-envsubst < "$SCRIPT_DIR/09-metrics-exporter-deployment.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/10-keda-scaledobject.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/11a-executor-small-stub.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/11b-executor-large-stub.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/11c-executor-configmaps.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/11-coredns-custom.yaml" | kubectl apply -f -
-envsubst < "$SCRIPT_DIR/12d-dremio-ops-credentials-secret.yaml" | kubectl apply -f -
+echo "=== Applying executor manifests ==="
+kubectl apply -f 08-service-executor.yaml
+kubectl apply -f 10-configmap-executor-small.yaml
+kubectl apply -f 11-configmap-executor-large.yaml
+kubectl apply -f 12-executor-small.yaml
+kubectl apply -f 13-executor-large.yaml
+
+echo "=== Applying KEDA autoscaling ==="
+kubectl apply -f 06-keda-small.yaml
+kubectl apply -f 07-keda-large.yaml
 
 echo "=== Waiting for coordinator to be ready ==="
-kubectl rollout status deployment/dremio-coordinator -n $NAMESPACE --timeout=300s
+kubectl wait --for=condition=Ready pod/dremio-coordinator-0 -n $NAMESPACE --timeout=300s
 
 echo "=== Done ==="
 kubectl get pods -n $NAMESPACE
-kubectl get hpa -n $NAMESPACE

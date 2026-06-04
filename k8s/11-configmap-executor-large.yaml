@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dremio-executor-config-large
+  namespace: dremio
+data:
+  dremio.conf: |
+    paths: {
+      local: "/opt/dremio/data"
+      dist: "pdfs:///opt/dremio/dist"
+    }
+    services: {
+      coordinator.enabled: false
+      coordinator.master.enabled: false
+      executor.enabled: true
+      executor.cache.enabled: true
+      node-tag: "large"
+    }
+    zookeeper: "dremio-coordinator.dremio.svc.cluster.local:2181"

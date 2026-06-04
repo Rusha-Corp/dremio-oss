@@ -1,0 +1,17 @@
+# This headless service already exists in the k3s cluster as 'dremio-executor'.
+# It selects pods with app=dremio, role=executor (both small and large tiers).
+# No changes needed unless recreating the namespace from scratch.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dremio-executor
+  namespace: dremio
+spec:
+  clusterIP: None
+  ports:
+    - name: rpc
+      port: 45678
+      targetPort: 45678
+  selector:
+    app: dremio
+    role: executor

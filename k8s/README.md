@@ -153,7 +153,8 @@ nodeSelector:
 
 | Tier | Spill Path | Cache Path | Storage |
 |------|-----------|------------|---------|
-| Small (PVC only) | `/opt/dremio/data/spill` | `/opt/dremio/data/cache/*` | Single PVC |
+| Small (PVC) | `/opt/dremio/data/spill` | `/opt/dremio/data/cm/fs/*` | Longhorn PVC (30Gi) |
+| Large (PVC) | `/opt/dremio/data/spill` | `/opt/dremio/data/cm/fs/*` | Longhorn PVC (100Gi) |
 | Large (NVMe) | `/mnt/nvme/spill` | `/mnt/nvme/cache/*` | `hostPath` or local PV |
 
 ## Pitfalls & Lessons Learned
@@ -208,7 +209,36 @@ The default KEDA `cooldownPeriod` of 1800s (30 min) and `stabilizationWindowSeco
 - `scaleDown.stabilizationWindowSeconds: 300` (5 min stability window)
 - `scaleUp.stabilizationWindowSeconds: 0` (scale up immediately)
 
-### 6. `minReplicaCount: 0` vs `1`
+### 6. Ephemeral Storage Eviction Kills Executors (No PVC for `/opt/dremio/data`)
+
+**Symptom:** `ExecutionSetupException: One or more nodes lost connectivity during query. Identified nodes were [10.42.x.x:0]`. Small executor pods are repeatedly evicted with `Pod ephemeral local storage usage exceeds the total limit of containers 10Gi`.
+
+**Root cause:** When `executor.cache.enabled: true` (which is the default), Dremio writes column cache data to `/opt/dremio/data/cm/fs/`. Without a PVC for `/opt/dremio/data`, this data goes to the container's writable overlay layer, which counts against the `ephemeral-storage` limit. Once cache grows past 10Gi, the Kubelet evicts the pod mid-query, causing the coordinator to see the node as disconnected.
+
+**Evidence:**
+- Large executor: 29GB of column cache data, but has a 100Gi Longhorn PVC → no eviction
+- Small executor: No PVC for `/opt/dremio/data` → data in overlay → eviction at 10Gi limit
+- K8s events: `Pod ephemeral local storage usage exceeds the total limit`
+- `preStop: sleep 120` hook fails during eviction → no graceful shutdown
+
+**Fix:** Add a `volumeClaimTemplates` entry for `/opt/dremio/data` in the StatefulSet (same pattern as the large executor):
+```yaml
+volumeMounts:
+  - mountPath: /opt/dremio/data
+    name: dremio-local
+# ...
+volumeClaimTemplates:
+  - metadata:
+      name: dremio-local
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 30Gi
+      storageClassName: longhorn
+```
+
+### 7. `minReplicaCount: 0` vs `1`
 
 | Setting | Pros | Cons |
 |---------|------|------|

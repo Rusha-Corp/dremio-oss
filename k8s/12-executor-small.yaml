@@ -78,6 +78,8 @@ spec:
               name: dremio-config
             - mountPath: /opt/dremio/dist
               name: dremio-dist
+            - mountPath: /opt/dremio/data
+              name: dremio-local
       imagePullSecrets:
         - name: ghcr-secret
       nodeSelector:
@@ -95,3 +97,13 @@ spec:
         - name: dremio-dist
           persistentVolumeClaim:
             claimName: dremio-dist
+  volumeClaimTemplates:
+    - metadata:
+        name: dremio-local
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 30Gi
+        storageClassName: longhorn

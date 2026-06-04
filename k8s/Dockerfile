@@ -16,7 +16,8 @@ COPY dremio-distribution.tar.gz /tmp/
 RUN tar xfz /tmp/dremio-distribution.tar.gz -C /opt/dremio --strip-components=1 \
     && rm /tmp/dremio-distribution.tar.gz
 
-# Copy fixed exec-selector and resourcescheduler JARs
+# Copy fixed JARs (common includes updated dremio-reference.conf)
+COPY dremio-common-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
 COPY dremio-services-execselector-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
 COPY dremio-services-resourcescheduler-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
 

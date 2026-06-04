@@ -18,7 +18,7 @@ spec:
         - name: ghcr-secret
       containers:
         - name: metrics-exporter
-          image: ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.8
+          image: ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.9
           imagePullPolicy: Always
           ports:
             - containerPort: 5001

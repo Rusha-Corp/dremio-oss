@@ -37,7 +37,7 @@ spec:
                 fieldRef:
                   fieldPath: status.podIP
             - name: DREMIO_MAX_MEMORY_SIZE_MB
-              value: "14336"
+              value: "20480"
           lifecycle:
             preStop:
               exec:
@@ -65,11 +65,11 @@ spec:
             limits:
               cpu: "4"
               ephemeral-storage: 60Gi
-              memory: 16Gi
+              memory: 24Gi
             requests:
               cpu: "2"
               ephemeral-storage: 30Gi
-              memory: 8Gi
+              memory: 10Gi
           securityContext:
             runAsGroup: 0
             runAsUser: 0

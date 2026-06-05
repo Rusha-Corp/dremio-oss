@@ -69,6 +69,12 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   private static final int METRICS_PORT = 45679;
   private static final int IDLE_RESET_THRESHOLD = 3; // 3 × 10 s = 30 s
   private final AtomicInteger idlePollCount = new AtomicInteger(0);
+  // Armed to false by scaleDeployment() when a scale-up is requested.
+  // Set to true by checkAndResetIfIdle() when jobs_active or maestro_active > 0.
+  // The idle countdown is suppressed while this is false to protect the executor
+  // cold-start window (typically 60–90 s) during which jobs_active=0 even though
+  // executors are being provisioned and the coordinator is blocking in waitForExecutors().
+  private volatile boolean jobSeenSinceScaleUp = true;
   private final ScheduledExecutorService idleResetScheduler =
       Executors.newSingleThreadScheduledExecutor(
           r -> {
@@ -120,7 +126,20 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
       double jobsActive = parsePrometheusGauge(metrics, "jobs_active");
       double maestroActive = parsePrometheusGauge(metrics, "maestro_active");
 
-      if (jobsActive == 0.0 && maestroActive == 0.0) {
+      if (jobsActive > 0.0 || maestroActive > 0.0) {
+        // Work is active — record that at least one job has run since the last scale-up,
+        // which makes it safe to reset desired counts once we go idle again.
+        jobSeenSinceScaleUp = true;
+        idlePollCount.set(0);
+      } else {
+        // jobs_active=0 and maestro_active=0.
+        // Guard: if a scale-up was requested but no job has been seen yet, this is the
+        // executor cold-start window — suppress the countdown to avoid prematurely
+        // resetting elastic_desired_* while executors are still starting up.
+        if (!jobSeenSinceScaleUp) {
+          idlePollCount.set(0);
+          return;
+        }
         if (idlePollCount.incrementAndGet() >= IDLE_RESET_THRESHOLD) {
           int prevSmall = desiredSmall.getAndSet(0);
           int prevLarge = desiredLarge.getAndSet(0);
@@ -130,10 +149,9 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
                     + "resetting elastic_desired_small={} elastic_desired_large={} to 0",
                 IDLE_RESET_THRESHOLD * 10, prevSmall, prevLarge);
           }
+          jobSeenSinceScaleUp = false; // re-arm for the next scale-up cycle
           idlePollCount.set(0);
         }
-      } else {
-        idlePollCount.set(0);
       }
     } catch (Exception e) {
       logger.debug("Idle-reset metrics poll failed (non-fatal): {}", e.getMessage());
@@ -266,6 +284,11 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
         desiredSmall.set(newReplicas);
       } else {
         desiredLarge.set(newReplicas);
+      }
+      // Arm the cold-start guard so the idle-reset does not fire while executors
+      // are starting up (jobs_active=0 during the ~60-90s provisioning window).
+      if (newReplicas > 0) {
+        jobSeenSinceScaleUp = false;
       }
 
       logger.info(

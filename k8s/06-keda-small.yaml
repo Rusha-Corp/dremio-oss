@@ -43,6 +43,6 @@ spec:
       metadata:
         serverAddress: http://prometheus.rusha.svc.cluster.local:9090
         metricName: dremio_work_active_small
-        query: "clamp_min(jobs_active + maestro_active + reflections_active, 0)"
+        query: "clamp_min(jobs_active_small + maestro_active_small + reflections_active_small, 0)"
         threshold: "1"
         activationThreshold: "0"

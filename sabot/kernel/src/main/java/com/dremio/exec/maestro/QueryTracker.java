@@ -22,6 +22,7 @@ import com.dremio.exec.proto.CoordExecRPC.NodeQueryFirstError;
 import com.dremio.exec.proto.CoordExecRPC.NodeQueryScreenCompletion;
 import com.dremio.exec.rpc.RpcException;
 import com.dremio.exec.testing.ExecutionControls;
+import com.dremio.resource.ResourceSchedulingDecisionInfo;
 import com.dremio.resource.exception.ResourceAllocationException;
 
 /** Handles the life-cycle of query during the execution phases (post logical planning). */
@@ -83,4 +84,6 @@ interface QueryTracker extends AutoCloseable, QueryLifecycle {
   void putExecutorProfile(String nodeEndpoint);
 
   void removeExecutorProfile(String nodeEndpoint);
+
+  ResourceSchedulingDecisionInfo getResourceSchedulingDecisionInfo();
 }

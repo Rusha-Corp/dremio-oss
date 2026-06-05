@@ -36,6 +36,7 @@ import com.dremio.exec.testing.ExecutionControls;
 import com.dremio.exec.work.foreman.CompletionListener;
 import com.dremio.exec.work.foreman.ExecutionPlan;
 import com.dremio.resource.ResourceAllocator;
+import com.dremio.resource.ResourceSchedulingDecisionInfo;
 import com.dremio.resource.ResourceSet;
 import com.dremio.resource.exception.ResourceAllocationException;
 import com.dremio.sabot.op.writer.WriterOperator;
@@ -324,6 +325,11 @@ public class QueryTrackerImpl implements QueryTracker {
   @Override
   public void removeExecutorProfile(String nodeEndpoint) {
     fragmentTracker.removeExecutorProfile(nodeEndpoint);
+  }
+
+  @Override
+  public ResourceSchedulingDecisionInfo getResourceSchedulingDecisionInfo() {
+    return resourceTracker != null ? resourceTracker.getResourceSchedulingDecisionInfo() : null;
   }
 
   @Override

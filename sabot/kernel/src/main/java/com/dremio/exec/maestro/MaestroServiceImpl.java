@@ -48,6 +48,7 @@ import com.dremio.querystate.ResourceAllocationDetails;
 import com.dremio.querystate.ResourceIdentifier;
 import com.dremio.resource.GroupResourceInformation;
 import com.dremio.resource.ResourceAllocator;
+import com.dremio.resource.ResourceSchedulingDecisionInfo;
 import com.dremio.resource.ResourceSchedulingProperties;
 import com.dremio.resource.exception.ResourceAllocationException;
 import com.dremio.sabot.rpc.ExecToCoordStatusHandler;
@@ -169,9 +170,28 @@ public class MaestroServiceImpl implements MaestroService {
   @Override
   public void start() throws Exception {
     newGauge("maestro.active", activeQueryMap::size);
+    newGauge("maestro.active.small", () -> getActiveQueryCountForTier(false));
+    newGauge("maestro.active.large", () -> getActiveQueryCountForTier(true));
     scheduleQueryLifecycleObservabilityTasks();
     execToCoordStatusHandlerImpl = new ExecToCoordStatusHandlerImpl(jobTelemetryClient);
     reader = sabotContext.get().getPlanReader();
+  }
+
+  private int getActiveQueryCountForTier(boolean large) {
+    return (int)
+        activeQueryMap.values().stream()
+            .map(QueryTracker::getResourceSchedulingDecisionInfo)
+            .filter(info -> isLargeQueue(info) == large)
+            .count();
+  }
+
+  private static boolean isLargeQueue(ResourceSchedulingDecisionInfo info) {
+    if (info == null || info.getQueueName() == null) {
+      return false;
+    }
+
+    String queueName = info.getQueueName().toUpperCase();
+    return "LARGE".equals(queueName) || "REFLECTION_LARGE".equals(queueName);
   }
 
   public void scheduleQueryLifecycleObservabilityTasks() {

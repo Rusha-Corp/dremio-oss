@@ -287,7 +287,7 @@ public class AttemptManager implements Runnable, MaestroObserver.ExecutionStageC
     injector.injectUnchecked(queryContext.getExecutionControls(), INJECTOR_CONSTRUCTOR_ERROR);
   }
 
-  protected AttemptProfileTracker getProfileTracker() {
+  public AttemptProfileTracker getProfileTracker() {
     return this.profileTracker;
   }
 

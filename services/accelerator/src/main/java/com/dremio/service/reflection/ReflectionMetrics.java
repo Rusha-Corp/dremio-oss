@@ -29,7 +29,11 @@ public class ReflectionMetrics {
   public static final String RM_RETRYING = "retrying";
   public static final String RM_FAILED = "failed";
   public static final String RM_ACTIVE = "active";
+  public static final String RM_ACTIVE_SMALL = "active_small";
+  public static final String RM_ACTIVE_LARGE = "active_large";
   public static final String RM_REFRESHING = "refreshing";
+  public static final String RM_REFRESHING_SMALL = "refreshing_small";
+  public static final String RM_REFRESHING_LARGE = "refreshing_large";
   // Counter for when a reflection is deleted
   public static final String RM_DELETED = "deleted";
 

@@ -777,7 +777,11 @@ public class ReflectionUtils {
         new JobDetails()
             .setJobId(info.getJobId().getId())
             .setJobStart(info.getStartTime())
-            .setJobEnd(info.getFinishTime());
+            .setJobEnd(info.getFinishTime())
+            .setQueueName(
+                info.getResourceSchedulingInfo() != null
+                    ? info.getResourceSchedulingInfo().getQueueName()
+                    : null);
 
     final JobStats stats = jobAttempt.getStats();
     if (stats != null) {

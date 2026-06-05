@@ -28,8 +28,21 @@ spec:
     kind: StatefulSet
     name: dremio-executor-large
   triggers:
-    - type: metrics-api
+    # Primary: coordinator's published desired count drives replica count
+    - type: prometheus
       metadata:
-        url: "http://dremio-metrics-exporter.dremio.svc.cluster.local:5001/json"
-        valueLocation: "executor_desired_large"
-        targetValue: "1"
+        serverAddress: http://prometheus.rusha.svc.cluster.local:9090
+        metricName: elastic_desired_large
+        query: "elastic_desired_large"
+        threshold: "1"
+        activationThreshold: "0"
+    # Guard: keep at least 1 while any job or query plan is active.
+    # KEDA takes the max across all triggers, so this holds the tier alive even
+    # during the 30s idle-reset window after coordinator's metric drops to 0.
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.rusha.svc.cluster.local:9090
+        metricName: dremio_work_active_large
+        query: "clamp_min(jobs_active + maestro_active, 0)"
+        threshold: "1"
+        activationThreshold: "0"

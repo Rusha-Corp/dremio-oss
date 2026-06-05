@@ -21,6 +21,11 @@ import io.fabric8.kubernetes.api.model.apps.StatefulSet;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
@@ -56,6 +61,22 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   private final AtomicInteger desiredSmall = new AtomicInteger(0);
   private final AtomicInteger desiredLarge = new AtomicInteger(0);
 
+  // Idle-reset: resets desiredSmall/desiredLarge to 0 when both jobs_active and
+  // maestro_active have been 0 for IDLE_RESET_THRESHOLD consecutive polls (30 s).
+  // This prevents stale elastic_desired_* metrics from keeping executors running
+  // after a query completes or is cancelled, since ElasticResourceAllocator has
+  // no query-completion hook to call scaleExecutors(-N).
+  private static final int METRICS_PORT = 45679;
+  private static final int IDLE_RESET_THRESHOLD = 3; // 3 × 10 s = 30 s
+  private final AtomicInteger idlePollCount = new AtomicInteger(0);
+  private final ScheduledExecutorService idleResetScheduler =
+      Executors.newSingleThreadScheduledExecutor(
+          r -> {
+            Thread t = new Thread(r, "elastic-idle-reset");
+            t.setDaemon(true);
+            return t;
+          });
+
   public K8sPlatform(
       KubernetesClient k8sClient,
       String namespace,
@@ -79,6 +100,58 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
         "elastic_desired_large",
         "Desired large executor replicas as requested by ElasticResourceAllocator",
         desiredLarge::get);
+    idleResetScheduler.scheduleAtFixedRate(this::checkAndResetIfIdle, 10, 10, TimeUnit.SECONDS);
+  }
+
+  /**
+   * Polls the coordinator's own liveness /metrics endpoint every 10 s. When both
+   * {@code jobs_active} and {@code maestro_active} have been 0 for
+   * {@link #IDLE_RESET_THRESHOLD} consecutive polls, resets desiredSmall and
+   * desiredLarge to 0 so that stale elastic_desired_* gauges do not keep executors
+   * running indefinitely after a query completes or is cancelled.
+   */
+  private void checkAndResetIfIdle() {
+    try {
+      URL url = new URL("http://localhost:" + METRICS_PORT + "/metrics");
+      String metrics;
+      try (InputStream is = url.openStream()) {
+        metrics = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+      }
+      double jobsActive = parsePrometheusGauge(metrics, "jobs_active");
+      double maestroActive = parsePrometheusGauge(metrics, "maestro_active");
+
+      if (jobsActive == 0.0 && maestroActive == 0.0) {
+        if (idlePollCount.incrementAndGet() >= IDLE_RESET_THRESHOLD) {
+          int prevSmall = desiredSmall.getAndSet(0);
+          int prevLarge = desiredLarge.getAndSet(0);
+          if (prevSmall > 0 || prevLarge > 0) {
+            logger.info(
+                "Idle reset: jobs_active=0 maestro_active=0 for {}s — "
+                    + "resetting elastic_desired_small={} elastic_desired_large={} to 0",
+                IDLE_RESET_THRESHOLD * 10, prevSmall, prevLarge);
+          }
+          idlePollCount.set(0);
+        }
+      } else {
+        idlePollCount.set(0);
+      }
+    } catch (Exception e) {
+      logger.debug("Idle-reset metrics poll failed (non-fatal): {}", e.getMessage());
+    }
+  }
+
+  /** Parses a bare {@code name <value>} line from a Prometheus text-format scrape. */
+  private static double parsePrometheusGauge(String metrics, String name) {
+    for (String line : metrics.split("\n")) {
+      if (line.startsWith(name + " ") && !line.startsWith("#")) {
+        try {
+          return Double.parseDouble(line.substring(name.length()).trim());
+        } catch (NumberFormatException ignored) {
+          // fall through → return 0
+        }
+      }
+    }
+    return 0.0;
   }
 
   @Override
@@ -209,6 +282,7 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
 
   @Override
   public void close() throws IOException {
+    idleResetScheduler.shutdownNow();
     k8sClient.close();
   }
 }

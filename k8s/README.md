@@ -4,7 +4,7 @@
 
 This is our k3s playground for testing Dremio elastic executor scaling with KEDA autoscaling. The manifests are configured for our specific environment (k3s + Longhorn on a single Contabo node), but the **pitfalls and lessons learned documented here apply to any Dremio elastic scaling deployment on Kubernetes**.
 
-The executor tiers (small/large) scale from zero based on query demand and scale down when idle. A metrics exporter bridges Dremio's `ElasticResourceAllocator` with KEDA to drive scaling decisions.
+The executor tiers (small/large) scale from zero based on query demand and scale down when idle. KEDA reads scaling metrics directly from the coordinator's Prometheus endpoint — no sidecar exporter required.
 
 ## What's Running
 
@@ -13,18 +13,17 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 | Kubernetes | k3s on a single node (`vmi1594378.contaboserver.net`) |
 | Storage | Longhorn (all PVCs use `storageClassName: longhorn`) |
 | Dremio OSS | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` |
-| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.8` |
 | KEDA | v2.x operator installed on cluster |
+| Prometheus | Deployed in `rusha` namespace, scrapes coordinator every 5s |
 | Coordinator | 1 pod, 4Gi heap |
 | Small executors | KEDA-managed StatefulSet, 4Gi heap, 15Gi/30Gi ephemeral-storage, 30Gi data PVC |
-| Large executors | KEDA-managed StatefulSet, 14Gi heap, 30Gi/60Gi ephemeral-storage, 100Gi data PVC |
+| Large executors | KEDA-managed StatefulSet, 20Gi heap, 30Gi/60Gi ephemeral-storage, 100Gi data PVC |
 
 ## Images
 
 | Image | Registry URI | Source |
 |---|---|---|
 | Dremio OSS (coordinator + executor) | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` | Single binary; role determined by ConfigMap |
-| KEDA Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter:2026.05.8` | [github.com/Rusha-Corp/dremio-keda-exporter](https://github.com/Rusha-Corp/dremio-keda-exporter) |
 
 ## Manifests
 
@@ -44,9 +43,8 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 | `06-keda-small.yaml` | KEDA ScaledObject for small executor tier |
 | `07-keda-large.yaml` | KEDA ScaledObject for large executor tier |
 | `08-service-executor.yaml` | Headless service for executor StatefulSet DNS |
-| `09-metrics-exporter-deployment.yaml` | Metrics exporter deployment + service |
 | `10-configmap-executor-small.yaml` | Small executor Dremio config |
-| `10-configmap-executor-large.yaml` | Large executor Dremio config |
+| `11-configmap-executor-large.yaml` | Large executor Dremio config |
 | `12-executor-small.yaml` | Small executor StatefulSet (30Gi data PVC) |
 | `13-executor-large.yaml` | Large executor StatefulSet (100Gi data PVC) |
 | `build-and-push.sh` | Build and push Docker image to GHCR |
@@ -54,9 +52,9 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 | `deploy.sh` | Deployment script with envsubst |
 | `services/nessie-token-rotator/` | Nessie catalog token rotation CronJob |
 
-## KEDA Metrics Exporter Integration
+## KEDA Prometheus Integration
 
-KEDA scales executors based on metrics from the `dremio-keda-exporter` sidecar. The flow is:
+KEDA scales executors using native `prometheus` triggers that read metrics published directly by the coordinator. No sidecar exporter is required.
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -65,73 +63,75 @@ KEDA scales executors based on metrics from the `dremio-keda-exporter` sidecar. 
 │  ElasticResourceAllocator                     │
 │  - query arrives → compute required executors │
 │  - scaleExecutors(delta, tier)                │
-│  - publishes elastic_desired_small/large      │
-│    as Prometheus gauges on :45679/metrics     │
-└───────────────────┬──────────────────────────┘
-                    │ :45679/metrics
-                    ▼
-         ┌──────────────────────┐
-         │  metrics-exporter    │  polls /apiv2/jobs every 5s
-         │  - reads             │◄─────────────────────────────
-         │    elastic_desired_* │
-         │  - applies scale-    │
-         │    gate logic        │
-         │  - exposes           │
-         │    executor_desired_*│
-         └──────────┬───────────┘
-                    │ :5001/json
-                    ▼
-         ┌──────────────────────┐
-         │   KEDA Controller    │  polls every 10s
-         └──────────┬───────────┘
-                    │ sets .spec.replicas
-                    ▼
-         ┌──────────────────────┐
-         │  Executor StatefulSets│
-         │  (small / large)      │
-         └──────────────────────┘
+│  - sets elastic_desired_small/large gauge     │
+│                                               │
+│  K8sPlatform idle-reset thread (every 10s)   │
+│  - polls jobs_active + maestro_active         │
+│  - after 30s idle → resets gauges to 0        │
+│    (cold-start guard suppresses during        │
+│     executor startup window)                  │
+│                                               │
+│  Liveness endpoint: :45679/metrics            │
+└──────────────────┬───────────────────────────┘
+                   │ Prometheus scrape (5s)
+                   ▼
+        ┌────────────────────┐
+        │  Prometheus        │  (rusha namespace)
+        └──────────┬─────────┘
+                   │ native prometheus trigger (10s)
+                   ▼
+        ┌────────────────────┐
+        │   KEDA Controller  │
+        └──────────┬─────────┘
+                   │ sets .spec.replicas
+                   ▼
+        ┌────────────────────┐
+        │ Executor StatefulSets│
+        │  (small / large)   │
+        └────────────────────┘
 ```
 
-1. The **coordinator** (`ElasticResourceAllocator`) evaluates each query's resource needs and calls `scaleExecutors(delta, tier)` when more executors are needed. `K8sPlatform` publishes the desired count as Prometheus gauges `elastic_desired_small` / `elastic_desired_large` on the liveness endpoint (`:45679/metrics`). This keeps the exporter fully decoupled from Kubernetes.
-2. The **metrics exporter** polls Dremio's `/apiv2/jobs` API every 5s (all pages) and reads `elastic_desired_*` from the liveness endpoint.
-3. It computes `executor_desired_small` and `executor_desired_large` using the scale-gate logic below.
-4. **KEDA** polls `:5001/json` every 10s and scales the StatefulSets up/down accordingly.
+### Scale-up path
 
-### Scale-gate logic
+1. Query arrives at the coordinator → `ElasticResourceAllocator` computes tier and delta
+2. `K8sPlatform.scaleDeployment()` sets `elastic_desired_small` or `elastic_desired_large` gauge to the new desired count and arms the cold-start guard (`jobSeenSinceScaleUp = false`)
+3. Prometheus scrapes the gauge within 5s → KEDA reads it within 10s → sets `spec.replicas`
+4. Executor pods start and register with ZooKeeper → `waitForExecutors()` returns → query executes
 
-```
-if active jobs > 0:
-    hold at current replicas (never scale down during queries)
-elif idle < SCALE_DOWN_GRACE_SECS (default 1800s):
-    hold at current replicas (drain window)
-elif idle < SCALE_DOWN_GRACE_SECS + TERMINAL_DRAIN_SECS (default +120s):
-    hold at current replicas (terminal drain — matches preStop hook)
-else:
-    desired = 0  (scale to zero)
-```
+### Scale-down path
 
-The **terminal drain period** (`TERMINAL_DRAIN_SECS=120`) matches the executor `preStop: sleep 120` hook. It adds a final buffer after the grace period expires, ensuring any in-flight query fragments complete before KEDA sends SIGTERM to executor pods. The timer resets immediately if new jobs are detected.
+The coordinator's `checkAndResetIfIdle()` thread (10s poll interval) tracks `jobs_active` and `maestro_active` from its own `:45679/metrics` endpoint. After 3 consecutive idle polls (30s), it resets `elastic_desired_small` and `elastic_desired_large` to 0.
 
-### Exporter environment variables
+When both triggers read 0, KEDA becomes INACTIVE and begins its `cooldownPeriod` (600s). After the cooldown, `spec.replicas` is set to 0 and pods terminate gracefully.
 
-| Variable | Default | Description |
+### Cold-start guard
+
+When `scaleDeployment()` is called with `newReplicas > 0`, it sets `jobSeenSinceScaleUp = false`. The idle countdown is suppressed while this flag is false — preventing the 30s reset from firing during the executor cold-start window (~60–90s) when `jobs_active=0` even though the coordinator is actively waiting for executors.
+
+The flag is set back to `true` by the idle-reset thread as soon as it sees `jobs_active > 0` for the first time, after which the idle countdown runs normally.
+
+### Dual triggers per ScaledObject
+
+Each ScaledObject has two `prometheus` triggers. KEDA takes the maximum across all triggers:
+
+| Trigger | Metric | Purpose |
 |---|---|---|
-| `DREMIO_URL` | `http://dremio-coordinator...` | Coordinator REST API URL |
-| `DREMIO_USERNAME` | — | Admin account for job polling (from `dremio-ops-credentials`) |
-| `DREMIO_PASSWORD` | — | Admin account password |
-| `NAMESPACE` | `dremio` | Kubernetes namespace |
-| `SCALE_DOWN_GRACE_SECS` | `1800` | Idle seconds to hold executors after last query before scaling to zero |
-| `TERMINAL_DRAIN_SECS` | `120` | Additional hold after grace period for in-flight fragment drain |
-| `MAX_JOB_PAGES` | `10` | Hard cap on `/apiv2/jobs` pagination pages (100 jobs/page); prevents OOM when Dremio has large job history |
-| `JOB_LOOKBACK_SECS` | `7200` | Stop pagination when jobs are older than this many seconds; active jobs must have started within this window |
+| Primary | `elastic_desired_small` / `elastic_desired_large` | Drives the desired replica count |
+| Guard | `jobs_active + maestro_active (+ reflections_active for small)` | Keeps executors alive while work is running, even during the 30s idle-reset window |
 
-The metrics exporter requires `dremio-ops-credentials` secret:
-```bash
-kubectl create secret generic dremio-ops-credentials \
-  --namespace=dremio \
-  --from-literal=DREMIO_USERNAME=<admin-username> \
-  --from-literal=DREMIO_PASSWORD=<admin-password>
+### Prometheus scrape configuration
+
+The coordinator liveness endpoint must be reachable from Prometheus. Example scrape job (add to your Prometheus ConfigMap):
+
+```yaml
+- job_name: dremio-coordinator
+  scrape_interval: 5s
+  static_configs:
+    - targets:
+        - dremio-coordinator-liveness.dremio:45679
 ```
+
+Replace `dremio-coordinator-liveness.dremio:45679` with the coordinator's liveness service DNS and port for your namespace. The liveness service is defined in `02-service.yaml`.
 
 ## Building the Image
 
@@ -178,6 +178,19 @@ export GHCR_TOKEN=<your-registry-token>
 ```bash
 kubectl get pods -n dremio
 kubectl logs dremio-coordinator-0 -n dremio
+```
+
+Check that the coordinator is publishing metrics (after the first scale-up event triggers gauge initialization):
+
+```bash
+kubectl run curl-test --image=curlimages/curl --rm -it --restart=Never -n dremio -- \
+  curl -s http://dremio-coordinator-liveness.dremio.svc.cluster.local:45679/metrics \
+  | grep elastic_desired
+```
+
+Verify KEDA ScaledObjects are healthy:
+```bash
+kubectl get scaledobject -n dremio
 ```
 
 ## Adapting for Other Platforms
@@ -251,11 +264,11 @@ nodeSelector:
 | Large | `/opt/dremio/data/spill` | `/opt/dremio/data/cm/fs/*` | 100Gi minimum |
 | Large (NVMe) | `/mnt/nvme/spill` | `/mnt/nvme/cache/*` | `hostPath` or local PV |
 
-> **Sizing guidance:** The column cache (`/opt/dremio/data/cm/fs/`) grows with the amount of data queried. 30Gi is a reasonable starting point for small executors, but monitor PVC usage and increase if cache eviction appears in logs. Large executors working on bigger datasets may need 100Gi or more. On our playground, we observed the large executor cache reaching 29GB.
+> **Sizing guidance:** The column cache (`/opt/dremio/data/cm/fs/`) grows with the amount of data queried. 30Gi is a reasonable starting point for small executors, but monitor PVC usage and increase if cache eviction appears in logs. Large executors working on bigger datasets may need 100Gi or more.
 
 ## Pitfalls & Lessons Learned
 
-These are real issues we hit during testing on our k3s playground. They apply broadly to any Dremio elastic scaling deployment on Kubernetes — especially the ephemeral storage eviction and probe pitfalls, which are easy to miss.
+These are real issues we hit during testing on our k3s playground. They apply broadly to any Dremio elastic scaling deployment on Kubernetes.
 
 ### 1. KEDA `maxReplicaCount` Too Low Causes Query Stampedes
 
@@ -313,11 +326,6 @@ The default KEDA `cooldownPeriod` of 1800s (30 min) and `stabilizationWindowSeco
 
 **Root cause:** Dremio executors write working data (JAR extractions, native libraries in `/tmp`, query spill, logs) to the container's writable overlay layer. Even though `/opt/dremio/data` is on a PVC (and therefore excluded from ephemeral storage accounting), the overlay layer accumulates ~1GB+ of runtime artifacts. When the container's `ephemeral-storage` limit is set too low (e.g. the original `10Gi` for small executors), the Kubelet evicts the pod mid-query.
 
-On our playground we observed:
-- K8s events: `Pod ephemeral local storage usage exceeds the total limit of containers 10Gi`
-- `preStop: sleep 120` hook fails during eviction — no graceful shutdown
-- Executors enter a crash loop: evicted → recreated → eviction repeats
-
 **Fix:** Increase `ephemeral-storage` limits in the executor StatefulSet to provide adequate headroom:
 
 | Tier | Requests | Limits |
@@ -350,40 +358,9 @@ spec:
 
 > **Note:** With `whenScaled: Delete`, PVCs are deleted when the replica count decreases. This is correct for elastic executors because the cache rebuilds from scratch on scale-up anyway. Do NOT use this for the coordinator or any stateful workload where data persistence matters.
 
-### 8. Dremio's `/apiv2/jobs` Pagination URL Uses Wrong Path Prefix
+### 8. Executor Log Flood from Netty DEBUG Hex Dumps
 
-**Symptom:** Metrics exporter logs `WARNING Dremio unavailable: Expecting value: line 1 column 1 (char 0)` on every poll cycle. `registered_executors` shows 0. The exporter appears to work (still holds executor counts) but job detection is broken.
-
-**Root cause:** Dremio's `/apiv2/jobs` response includes a `"next"` field for pagination, but the path it returns uses `/jobs/?offset=N&limit=N` instead of `/apiv2/jobs?offset=N&limit=N`. If the exporter naively appends this path to the base URL, the resulting request hits the Dremio web UI (which returns HTML), and `json.loads(HTML)` fails with `Expecting value`.
-
-This only triggers when there are **100+ jobs in history** (i.e., the first page is full and a `"next"` link exists).
-
-**Fix:** Extract only the query string from `"next"` and append it to `/apiv2/jobs`:
-```python
-next_path = data.get("next")
-if next_path and "?" in next_path:
-    url = f"{base_url}/apiv2/jobs?{next_path.split('?', 1)[1]}"
-else:
-    url = None
-```
-
-This is fixed in `dremio-keda-exporter:2026.05.7`.
-
-### 9. Metrics Exporter OOMKill and Stale-Zero Metrics from Full Job History Pagination
-
-**Symptom:** Exporter pod is OOMKilled (512Mi limit), or KEDA sees `executor_desired_small=0` and never scales up even when queries are submitted.
-
-**Root cause:** The exporter's `list_jobs()` method followed every pagination page of `/apiv2/jobs`, accumulating all historical jobs in memory. With 830,000+ completed jobs in Dremio's history:
-1. All job dicts held in the `all_jobs` list → ~415MB → OOMKill at 512Mi
-2. Pagination takes several minutes → the background collection thread is blocked → `/json` returns a stale snapshot with 0 active jobs → KEDA holds at 0 replicas
-
-**Fix:** Exporter `2026.05.8` stops pagination as soon as it encounters a job whose `startTime` is older than `JOB_LOOKBACK_SECS` (default 2h). Any currently-active job must have started within this window, so older pages are irrelevant. A hard `MAX_JOB_PAGES=10` cap guards against edge cases. Both limits are tunable via env vars.
-
-A related fix: any exception from the Dremio API (not just `TimeoutError`) now fails open (`active_user_jobs=99`), preventing KEDA from scaling to zero on transient connection errors.
-
-### 10. Executor Log Flood from Netty DEBUG Hex Dumps
-
-**Symptom:** Small executor evicted for `Pod ephemeral local storage usage exceeds the total limit of containers 30Gi`, but `df` inside the pod shows only ~1GB used. Kubelet stats show `logs usedBytes: 10+ GB` while `rootfs usedBytes: ~124MB`.
+**Symptom:** Executor evicted for `Pod ephemeral local storage usage exceeds the total limit of containers 30Gi`, but `df` inside the pod shows only ~1GB used. Kubelet stats show `logs usedBytes: 10+ GB` while `rootfs usedBytes: ~124MB`.
 
 **Root cause:** The ConfigMap volume mount for `/opt/dremio/conf` hides the distribution's bundled `logback.xml`. The fallback classpath config (from `sabot-kernel.jar`) leaves `io.netty` at DEBUG level and sends all wire traffic to stdout. With S3-backed queries, every 8KB HTTP response chunk is hex-dumped as ~512 lines of text, generating ~1 GB/min of container log output. The kubelet counts stdout/stderr (captured to `/var/log/pods/`) toward the pod's ephemeral-storage limit separately from the overlay writable layer.
 
@@ -395,7 +372,25 @@ A related fix: any exception from the Dremio API (not just `TimeoutError`) now f
 ```
 This is already present in `10-configmap-executor-small.yaml` and `11-configmap-executor-large.yaml`.
 
-### 12. New `DremioConfig` keys must be added to `dremio-reference.conf`
+### 9. Cold-Start Guard Prevents Premature Idle-Reset During Executor Startup
+
+**Symptom:** Query submitted from a cold state (0 executors) → executors start → query times out in the `waitForExecutors()` call (5 minutes). Coordinator logs show `elastic_desired_*` was reset to 0 during executor startup.
+
+**Root cause:** Race condition in the coordinator's idle-reset thread. When a query arrives with 0 executors:
+
+1. `scaleExecutors(+N)` sets `elastic_desired_large=N` → KEDA provisions pods
+2. `waitForExecutors()` blocks for up to 5 minutes while pods start
+3. During this window, `jobs_active=0` and `maestro_active=0` (no executors registered yet)
+4. Without the guard, after 30s the idle-reset thread resets `elastic_desired_large` back to 0
+5. KEDA sees 0 → scales back to 0 → pods terminate before Ready → `waitForExecutors()` times out → query fails
+
+**Fix:** The `jobSeenSinceScaleUp` volatile flag acts as a guard:
+- `scaleDeployment()` sets it to `false` when `newReplicas > 0` (arms the guard)
+- The idle countdown is skipped entirely while it is `false`
+- The flag is set back to `true` when `checkAndResetIfIdle()` sees `jobs_active > 0` for the first time (confirms executors are working)
+- After each idle-reset fires, the flag is reset to `false` to guard the next scale-up cycle
+
+### 10. New `DremioConfig` Keys Must Be Added to `dremio-reference.conf`
 
 **Symptom:** Coordinator crashes at startup with:
 ```
@@ -414,7 +409,7 @@ COPY dremio-common-26.0.5-...jar /opt/dremio/jars/
 COPY dremio-services-resourcescheduler-26.0.5-...jar /opt/dremio/jars/
 ```
 
-### 13. `minReplicaCount: 0` vs `1`
+### 11. `minReplicaCount: 0` vs `1`
 
 | Setting | Pros | Cons |
 |---------|------|------|
@@ -430,7 +425,7 @@ Executors **must** have `DREMIO_MAX_MEMORY_SIZE_MB` set to prevent OOMKills. Dre
 | Tier | Memory Request | Memory Limit | DREMIO_MAX_MEMORY_SIZE_MB | Ephemeral-Storage Request | Ephemeral-Storage Limit |
 |------|----------------|--------------|---------------------------|--------------------------|------------------------|
 | small | 4Gi | 8Gi | 6144 | 15Gi | 30Gi |
-| large | 8Gi | 16Gi | 14336 | 30Gi | 60Gi |
+| large | 20Gi | 24Gi | 20480 | 30Gi | 60Gi |
 
 ## Nessie Token Rotation
 
@@ -448,19 +443,21 @@ kubectl create secret generic nessie-token-rotator-secret \
 
 | Issue | Solution |
 |-------|----------|
-| Executor not spawning | Check coordinator logs: `kubectl logs dremio-coordinator-0 -n dremio \| grep -i elastic` |
+| Executor not spawning | Check coordinator logs: `kubectl logs -n dremio -l role=coordinator \| grep -i elastic` |
 | Executor can't connect to coordinator | Verify DNS: `kubectl exec <executor-pod> -n dremio -c executor -- nslookup dremio-coordinator.dremio.svc.cluster.local` |
 | ImagePullBackOff | Recreate registry secret: `kubectl create secret docker-registry ghcr-secret --docker-server=ghcr.io --docker-username=$GHCR_USERNAME --docker-password=$GHCR_TOKEN --namespace=dremio` |
 | ConfigMap properties invalid | Use only properties supported by the base image version |
 | Executor OOMKilled | Ensure `DREMIO_MAX_MEMORY_SIZE_MB` env var is set and pod memory limit is sufficient |
-| Metrics exporter 401 Unauthorized | Verify `dremio-ops-credentials` secret has valid Dremio admin credentials, then restart the pod |
-| KEDA not scaling executors | Check KEDA scaler status: `kubectl get scaledobject -n dremio` and metrics exporter logs |
+| KEDA not scaling executors | Check ScaledObject status: `kubectl get scaledobject -n dremio`; verify Prometheus is scraping coordinator |
+| `elastic_desired_*` stuck at 0 | Gauges only appear after first scale event; submit a query to trigger initialization |
+| `elastic_desired_*` never resets after query | Coordinator idle-reset thread may be disabled or failing — check coordinator logs for `elastic-idle-reset` thread |
 | Scale cap throttling (`requested N exceeds max M`) | Increase `maxReplicaCount` in KEDA ScaledObject |
 | Pods stuck at `0/1 Running` | Ensure probes use `tcpSocket` on port 45678, NOT `httpGet` on port 9047 |
 | Cold-start delays (30–90s) | Expected; reduce `cooldownPeriod` and `stabilizationWindowSeconds` for faster scale-up |
 | S3/object storage access denied | Configure `core-site.xml` in executor ConfigMaps with appropriate credential provider |
 | PVC provision failures | Verify `storageClassName` matches your platform's available storage classes |
 | Executor pod evicted for ephemeral storage | Increase `ephemeral-storage` limits (15Gi/30Gi for small, 30Gi/60Gi for large); set `whenScaled: Delete` on PVC retention policy (see Pitfalls #6 and #7) |
-| Executor evicted but `df` shows only ~1GB used | Eviction is from log flood, not disk writes — check `kubectl get --raw .../stats/summary` for `logs usedBytes`; ensure executor ConfigMaps include `logback.xml` with `io.netty` at WARN (see Pitfall #10) |
-| Exporter OOMKilled | Exporter is fetching all historical jobs; upgrade to `2026.05.8`+ which stops pagination early (see Pitfall #9) |
-| KEDA sees `executor_desired=0`, won't scale up | Exporter may be mid-pagination returning stale cache; upgrade to `2026.05.8`+ or reduce `MAX_JOB_PAGES` |
+| Executor evicted but `df` shows only ~1GB used | Eviction is from log flood, not disk writes — check kubelet stats for `logs usedBytes`; ensure executor ConfigMaps include `logback.xml` with `io.netty` at WARN (see Pitfall #8) |
+| KEDA sees 0, executors not scaling up | Verify Prometheus is scraping `:45679/metrics`; check `kubectl get scaledobject -n dremio` shows `ACTIVE: True` after query submitted |
+| Coordinator crashes: `properties were invalid` | Config key missing from `dremio-reference.conf` — ensure image is `2026.05.7`+ (see Pitfall #10) |
+| Query fails immediately after scale-up on cold start | Cold-start guard may be missing — ensure coordinator image is `2026.05.7`+ (see Pitfall #9) |

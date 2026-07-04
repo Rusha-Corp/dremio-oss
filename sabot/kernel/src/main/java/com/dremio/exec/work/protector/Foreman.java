@@ -62,7 +62,6 @@ import com.dremio.options.OptionManager;
 import com.dremio.options.OptionValue;
 import com.dremio.partitionstats.cache.PartitionStatsCache;
 import com.dremio.proto.model.attempts.AttemptReason;
-import com.dremio.resource.ResourceSchedulingDecisionInfo;
 import com.dremio.resource.RuleBasedEngineSelector;
 import com.dremio.sabot.rpc.user.UserSession;
 import com.dremio.service.commandpool.CommandPool;
@@ -406,12 +405,6 @@ public class Foreman {
 
   public ExternalId getExternalId() {
     return attemptId.getExternalId();
-  }
-
-  public ResourceSchedulingDecisionInfo getCurrentResourceSchedulingDecisionInfo() {
-    return attemptManager != null
-        ? attemptManager.getProfileTracker().getResourceSchedulingDecisionInfo()
-        : null;
   }
 
   public synchronized void cancel(String reason, boolean clientCancelled, boolean runTimeExceeded) {

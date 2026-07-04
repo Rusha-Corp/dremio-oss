@@ -117,7 +117,6 @@ message JobDetails {
   optional int64 input_records = 5;
   optional int64 output_bytes = 6;
   optional int64 output_records = 7;
-  optional string queue_name = 8;
 }
 
 message RefreshDecision {

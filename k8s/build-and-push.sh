@@ -24,9 +24,6 @@ echo "=== Using tarball: $TARBALL ==="
 rm -f "$SCRIPT_DIR/dremio-distribution.tar.gz"
 cp "$TARBALL" "$SCRIPT_DIR/dremio-distribution.tar.gz"
 
-# 2b. Stage overlay JARs from Maven build output
-cp "$REPO_ROOT/services/accelerator/target/dremio-services-accelerator-"*.jar "$SCRIPT_DIR/" 2>/dev/null || true
-
 # 3. Login to GHCR
 echo "=== Logging in to GHCR ==="
 gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin

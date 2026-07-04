@@ -214,12 +214,6 @@ public class RefreshStartHandler {
     return materializationStore;
   }
 
-  public String getRefreshRoutingQueue(ReflectionEntry entry) {
-    // Reflection queue routing requires Catalog.getContext() which is not available
-    // in this build. Return null to use the default queue.
-    return null;
-  }
-
   protected ReflectionGoalsStore getReflectionGoalsStore() {
     return reflectionGoalStore;
   }

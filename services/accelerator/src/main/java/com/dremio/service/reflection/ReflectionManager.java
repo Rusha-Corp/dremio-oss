@@ -201,7 +201,6 @@ public class ReflectionManager implements Runnable {
   private final SabotConfig sabotConfig;
 
   private volatile EntryCounts lastStats = new EntryCounts();
-  private final Map<ReflectionId, Boolean> reflectionTierById = Collections.synchronizedMap(new java.util.HashMap<>());
   private long lastWakeupTime;
   private long lastDeletedDatasetsCleanupTime;
   private long lastOrphanCheckTime;
@@ -275,20 +274,8 @@ public class ReflectionManager implements Runnable {
         ReflectionMetrics.createName(ReflectionMetrics.RM_ACTIVE),
         () -> ReflectionManager.this.lastStats.active);
     newGauge(
-        ReflectionMetrics.createName(ReflectionMetrics.RM_ACTIVE_SMALL),
-        () -> ReflectionManager.this.lastStats.activeSmall);
-    newGauge(
-        ReflectionMetrics.createName(ReflectionMetrics.RM_ACTIVE_LARGE),
-        () -> ReflectionManager.this.lastStats.activeLarge);
-    newGauge(
         ReflectionMetrics.createName(ReflectionMetrics.RM_REFRESHING),
         () -> ReflectionManager.this.lastStats.refreshing);
-    newGauge(
-        ReflectionMetrics.createName(ReflectionMetrics.RM_REFRESHING_SMALL),
-        () -> ReflectionManager.this.lastStats.refreshingSmall);
-    newGauge(
-        ReflectionMetrics.createName(ReflectionMetrics.RM_REFRESHING_LARGE),
-        () -> ReflectionManager.this.lastStats.refreshingLarge);
     this.syncHistogram =
         newTimerProvider(
             ReflectionMetrics.createName(ReflectionMetrics.RM_SYNC),
@@ -611,36 +598,8 @@ public class ReflectionManager implements Runnable {
     private long failed;
     private long retrying;
     private long refreshing;
-    private long refreshingSmall;
-    private long refreshingLarge;
     private long active;
-    private long activeSmall;
-    private long activeLarge;
     private long unknown;
-  }
-
-  private void incrementActiveTierCount(EntryCounts counts, ReflectionEntry entry) {
-    if (isLargeReflection(entry)) {
-      counts.activeLarge++;
-    } else {
-      counts.activeSmall++;
-    }
-  }
-
-  private void incrementRefreshingTierCount(EntryCounts counts, ReflectionEntry entry) {
-    if (isLargeReflection(entry)) {
-      counts.refreshingLarge++;
-    } else {
-      counts.refreshingSmall++;
-    }
-  }
-
-  private boolean isLargeReflection(ReflectionEntry entry) {
-    return reflectionTierById.getOrDefault(entry.getId(), false);
-  }
-
-  private static boolean isLargeQueueName(String queueName) {
-    return queueName != null && queueName.toLowerCase().contains("large");
   }
 
   /** Small class that stores delete materialization counts */
@@ -687,12 +646,10 @@ public class ReflectionManager implements Runnable {
       case REFRESHING:
       case COMPACTING:
         counts.refreshing++;
-        incrementRefreshingTierCount(counts, entry);
         handleRefreshingEntry(entry, dependencyResolutionContext);
         break;
       case UPDATE:
         counts.refreshing++;
-        incrementRefreshingTierCount(counts, entry);
         deprecateMaterializations(entry);
         startRefresh(entry);
         break;
@@ -700,7 +657,6 @@ public class ReflectionManager implements Runnable {
         if (!dependencyManager.shouldRefresh(
             entry, noDependencyRefreshPeriodMs, dependencyResolutionContext)) {
           counts.active++;
-          incrementActiveTierCount(counts, entry);
           // only refresh ACTIVE reflections when they are due for refresh
           if (optionManager.getOption(ReflectionOptions.ENABLE_VACUUM_FOR_INCREMENTAL_REFLECTIONS)
               && dependencyManager.shouldVacuum(entry)) {
@@ -713,7 +669,6 @@ public class ReflectionManager implements Runnable {
         if (!refreshPendingHelper(
             entry, noDependencyRefreshPeriodMs, dependencyResolutionContext)) {
           counts.active++;
-          incrementActiveTierCount(counts, entry);
           // refresh pending until all dependencies finish refreshing or this reflection's
           // REFRESH_PENDING state timed out.
           break;
@@ -721,7 +676,6 @@ public class ReflectionManager implements Runnable {
       // fall through to refresh reflections that are due for refresh
       case REFRESH:
         counts.refreshing++;
-        incrementRefreshingTierCount(counts, entry);
         logger.info("Refresh due for {}", getId(entry));
         startRefresh(entry);
         break;
@@ -1912,7 +1866,6 @@ public class ReflectionManager implements Runnable {
 
     try {
       final JobId refreshJobId = refreshStartHandler.startJob(entry, jobSubmissionTime);
-      reflectionTierById.put(entry.getId(), isLargeQueueName(refreshStartHandler.getRefreshRoutingQueue(entry)));
 
       entry.setState(REFRESHING).setRefreshJobId(refreshJobId);
       updateReflectionEntry(entry);

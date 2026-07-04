@@ -124,10 +124,6 @@ public class AttemptProfileTracker {
     return queryContext;
   }
 
-  public ResourceSchedulingDecisionInfo getResourceSchedulingDecisionInfo() {
-    return resourceSchedulingDecisionInfo;
-  }
-
   protected PlanCaptureAttemptObserver newCapturerObserver() {
     final OptionManager optionManager = queryContext.getOptions();
     return new PlanCaptureAttemptObserver(

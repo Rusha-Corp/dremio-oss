@@ -32,7 +32,6 @@ import com.google.protobuf.ByteString;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
-import java.util.stream.Collectors;
 
 public class SplitWork implements CompleteWork {
   private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(SplitWork.class);
@@ -117,13 +116,6 @@ public class SplitWork implements CompleteWork {
                 affinityType == DistributionAffinity.HARD ? 1 : Integer.MAX_VALUE));
       } else {
         if (affinityType == DistributionAffinity.HARD) {
-          logger.warn(
-              "Hard affinity mismatch: data affinity host '{}' (parsed host='{}', hasPort={}) "
-              + "not found in available executors {}. affinityType={}, allAffinityHosts={}",
-              a.getHost(), hostAndPort.getHost(), hostAndPort.hasPort(),
-              nodeMap.getHosts(), affinityType,
-              datasetSplit.getAffinitiesList().stream()
-                  .map(Affinity::getHost).collect(Collectors.toList()));
           // Throw an error if there is no endpoint on host
           throw UserException.resourceError()
               .message(

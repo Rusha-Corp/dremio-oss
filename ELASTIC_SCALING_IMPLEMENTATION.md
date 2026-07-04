@@ -28,7 +28,7 @@ Executors are tagged via `node-tag: "small"` or `node-tag: "large"` in their Con
 | Layer | Setting | Value | Purpose |
 |-------|---------|-------|---------|
 | K8sPlatform idle-reset | poll interval | 10s | Check `jobs.active` + `maestro.active` via Micrometer globalRegistry |
-| K8sPlatform idle-reset | threshold | 6 polls = 60s | Reset `elastic_desired_*` to 0 after idle |
+| K8sPlatform idle-reset | threshold | 6 polls = 60s | Reset `elastic_desired_*` to 0 after idle; uses total metrics (`jobs.active` + `maestro.active`) |
 | KEDA ScaledObject | `cooldownPeriod` | 600s | Hold pods after INACTIVE signal |
 | KEDA HPA | `stabilizationWindowSeconds` (scale-down) | 300s | Smooth replica changes |
 | Executor pod | `terminationGracePeriodSeconds` | 1800s | Allow in-flight query completion |
@@ -364,13 +364,14 @@ triggers:
 
   # Guard: keeps executors alive while work is running,
   # even during the 60s idle-reset window after elastic_desired drops to 0.
-  # Uses total reflections_active + reflections_refreshing (not tier-specific)
-  # because tier-specific reflection metrics are not yet deployed.
+  # Uses total metrics (jobs_active + maestro_active + reflections_active +
+  # reflections_refreshing) because small-tier queries can fall back to
+  # large executors, so keeping both tiers alive is the correct behavior.
   - type: prometheus
     metadata:
       serverAddress: http://prometheus.<namespace>.svc.cluster.local:9090
       metricName: dremio_work_active_small
-      query: "clamp_max(jobs_active_small + maestro_active_small + reflections_active + reflections_refreshing, 1)"
+      query: "clamp_max(jobs_active + maestro_active + reflections_active + reflections_refreshing, 1)"
       threshold: "1"
       activationThreshold: "0"
 ```
@@ -408,7 +409,7 @@ Key ScaledObject parameters:
 | `11-configmap-executor-large.yaml` | Large executor config (node-tag: large, logback.xml) |
 | `12-executor-small.yaml` | Small executor StatefulSet (replicas: 0, KEDA-controlled) |
 | `13-executor-large.yaml` | Large executor StatefulSet (replicas: 0, KEDA-controlled) |
-| `Dockerfile` | Coordinator/executor image build; overlays 7 custom JARs including `dremio-services-accelerator` |
+| `Dockerfile` | Coordinator/executor image build; overlays 6 custom JARs |
 | `build-and-push.sh` | Build and push script |
 | `deploy.sh` | Full deployment script |
 

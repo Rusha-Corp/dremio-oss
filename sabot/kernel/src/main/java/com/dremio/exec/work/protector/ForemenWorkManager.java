@@ -73,7 +73,6 @@ import com.dremio.options.OptionManager;
 import com.dremio.partitionstats.cache.PartitionStatsCache;
 import com.dremio.partitionstats.storeprovider.PartitionStatsCacheStoreProvider;
 import com.dremio.resource.QueryCancelTool;
-import com.dremio.resource.ResourceSchedulingDecisionInfo;
 import com.dremio.resource.RuleBasedEngineSelector;
 import com.dremio.sabot.exec.CancelQueryContext;
 import com.dremio.sabot.rpc.CoordExecService.NoExecToCoordResultsHandler;
@@ -241,8 +240,6 @@ public class ForemenWorkManager implements Service, SafeExit {
   @Override
   public void start() throws Exception {
     newGauge("jobs.active", externalIdToForeman::size);
-    newGauge("jobs.active.small", () -> getActiveQueryCountForTier(false));
-    newGauge("jobs.active.large", () -> getActiveQueryCountForTier(true));
 
     DremioConfig dremioConfig = dbContext.get().getDremioConfig();
     this.jobResultsAllocator =
@@ -440,10 +437,6 @@ public class ForemenWorkManager implements Service, SafeExit {
       this.registry = registry;
     }
 
-    private ResourceSchedulingDecisionInfo getResourceSchedulingDecisionInfo() {
-      return foreman.getCurrentResourceSchedulingDecisionInfo();
-    }
-
     private class ConnectionClosedListener implements GenericFutureListener<Future<Void>> {
 
       public ConnectionClosedListener() {
@@ -523,23 +516,6 @@ public class ForemenWorkManager implements Service, SafeExit {
   @VisibleForTesting
   public int getActiveQueryCount() {
     return externalIdToForeman.size();
-  }
-
-  private int getActiveQueryCountForTier(boolean large) {
-    return (int)
-        externalIdToForeman.values().stream()
-            .map(ManagedForeman::getResourceSchedulingDecisionInfo)
-            .filter(info -> isLargeQueue(info) == large)
-            .count();
-  }
-
-  private static boolean isLargeQueue(ResourceSchedulingDecisionInfo info) {
-    if (info == null || info.getQueueName() == null) {
-      return false;
-    }
-
-    String queueName = info.getQueueName().toUpperCase();
-    return "LARGE".equals(queueName) || "REFLECTION_LARGE".equals(queueName);
   }
 
   private ReAttemptHandler newInternalAttemptHandler(

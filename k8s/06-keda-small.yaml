@@ -36,15 +36,13 @@ spec:
         query: "elastic_desired_small"
         threshold: "1"
         activationThreshold: "0"
-    # Guard: keep at least 1 while any work is active on small tier
-    # (jobs, maestro sessions, reflections). Prevents KEDA from scaling
-    # down during the idle-reset window or cooldown period.
-    # Uses total reflections_active + reflections_refreshing (not tier-specific)
-    # because the tier-specific reflection metrics are not yet deployed.
+    # Guard: keep at least 1 while any work is active (jobs, maestro, reflections).
+    # Uses total metrics because small-tier queries can fall back to large
+    # executors, so keeping both tiers alive during any activity is correct.
     - type: prometheus
       metadata:
         serverAddress: http://prometheus.dremio.svc.cluster.local:9090
         metricName: dremio_work_active_small
-        query: "clamp_max(jobs_active_small + maestro_active_small + reflections_active + reflections_refreshing, 1)"
+        query: "clamp_max(jobs_active + maestro_active + reflections_active + reflections_refreshing, 1)"
         threshold: "1"
         activationThreshold: "0"

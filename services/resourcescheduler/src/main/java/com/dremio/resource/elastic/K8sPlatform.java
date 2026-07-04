@@ -19,11 +19,10 @@ import com.dremio.service.coordinator.ListenableSet;
 import com.dremio.telemetry.api.metrics.MeterProviders;
 import io.fabric8.kubernetes.api.model.apps.StatefulSet;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.Metrics;
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.InputStream;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -61,20 +60,20 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   private final AtomicInteger desiredSmall = new AtomicInteger(0);
   private final AtomicInteger desiredLarge = new AtomicInteger(0);
 
-  // Idle-reset: resets desiredSmall/desiredLarge to 0 when both jobs_active and
-  // maestro_active have been 0 for IDLE_RESET_THRESHOLD consecutive polls (30 s).
-  // This prevents stale elastic_desired_* metrics from keeping executors running
-  // after a query completes or is cancelled, since ElasticResourceAllocator has
+  // Idle-reset: resets desiredSmall/desiredLarge to 0 when all activity metrics
+  // (jobs.active, maestro.active) have been 0 for IDLE_RESET_THRESHOLD consecutive
+  // polls (60 s). This prevents stale elastic_desired_* metrics from keeping executors
+  // running after a query completes or is cancelled, since ElasticResourceAllocator has
   // no query-completion hook to call scaleExecutors(-N).
-  private static final int METRICS_PORT = 45679;
-  private static final int IDLE_RESET_THRESHOLD = 3; // 3 × 10 s = 30 s
+  private static final int IDLE_RESET_THRESHOLD = 6; // 6 × 10 s = 60 s
   private final AtomicInteger idlePollCount = new AtomicInteger(0);
-  // Armed to false by scaleDeployment() when a scale-up is requested.
-  // Set to true by checkAndResetIfIdle() when jobs_active or maestro_active > 0.
+  // Starts as false so the idle-reset cannot fire until a job is observed.
+  // Set to false by armIdleGuard() / scaleDeployment() when a scale-up is requested.
+  // Set to true by checkAndResetIfIdle() when any activity metric > 0.
   // The idle countdown is suppressed while this is false to protect the executor
   // cold-start window (typically 60–90 s) during which jobs_active=0 even though
   // executors are being provisioned and the coordinator is blocking in waitForExecutors().
-  private volatile boolean jobSeenSinceScaleUp = true;
+  private volatile boolean jobSeenSinceScaleUp = false;
   private final ScheduledExecutorService idleResetScheduler =
       Executors.newSingleThreadScheduledExecutor(
           r -> {
@@ -110,29 +109,33 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   }
 
   /**
-   * Polls the coordinator's own liveness /metrics endpoint every 10 s. When both
-   * {@code jobs_active} and {@code maestro_active} have been 0 for
-   * {@link #IDLE_RESET_THRESHOLD} consecutive polls, resets desiredSmall and
-   * desiredLarge to 0 so that stale elastic_desired_* gauges do not keep executors
-   * running indefinitely after a query completes or is cancelled.
+   * Checks if the coordinator is idle by reading activity gauges directly from the Micrometer
+   * globalRegistry. When all activity metrics (jobs.active, maestro.active) have been 0 for
+   * {@link #IDLE_RESET_THRESHOLD} consecutive polls, resets desiredSmall and desiredLarge to 0
+   * so that stale elastic_desired_* gauges do not keep executors running indefinitely after a
+   * query completes or is cancelled.
+   *
+   * <p>This replaces the previous HTTP polling approach. Since K8sPlatform runs in the same JVM
+   * as the coordinator, all gauges are accessible via {@code Metrics.globalRegistry} without
+   * network overhead or text parsing.
    */
   private void checkAndResetIfIdle() {
     try {
-      URL url = new URL("http://localhost:" + METRICS_PORT + "/metrics");
-      String metrics;
-      try (InputStream is = url.openStream()) {
-        metrics = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-      }
-      double jobsActive = parsePrometheusGauge(metrics, "jobs_active");
-      double maestroActive = parsePrometheusGauge(metrics, "maestro_active");
+      // Use total metrics (jobs.active, maestro.active) which cover all tiers.
+      // Tier-specific variants (jobs.active.small, etc.) are subsets of the totals,
+      // so checking totals is sufficient for the idle-reset decision.
+      double jobsActive = getGaugeValue("jobs.active");
+      double maestroActive = getGaugeValue("maestro.active");
 
-      if (jobsActive > 0.0 || maestroActive > 0.0) {
+      boolean active = jobsActive > 0.0 || maestroActive > 0.0;
+
+      if (active) {
         // Work is active — record that at least one job has run since the last scale-up,
         // which makes it safe to reset desired counts once we go idle again.
         jobSeenSinceScaleUp = true;
         idlePollCount.set(0);
       } else {
-        // jobs_active=0 and maestro_active=0.
+        // All activity metrics are 0.
         // Guard: if a scale-up was requested but no job has been seen yet, this is the
         // executor cold-start window — suppress the countdown to avoid prematurely
         // resetting elastic_desired_* while executors are still starting up.
@@ -145,7 +148,7 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
           int prevLarge = desiredLarge.getAndSet(0);
           if (prevSmall > 0 || prevLarge > 0) {
             logger.info(
-                "Idle reset: jobs_active=0 maestro_active=0 for {}s — "
+                "Idle reset: all activity metrics=0 for {}s — "
                     + "resetting elastic_desired_small={} elastic_desired_large={} to 0",
                 IDLE_RESET_THRESHOLD * 10, prevSmall, prevLarge);
           }
@@ -154,22 +157,14 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
         }
       }
     } catch (Exception e) {
-      logger.debug("Idle-reset metrics poll failed (non-fatal): {}", e.getMessage());
+      logger.debug("Idle-reset gauge read failed (non-fatal): {}", e.getMessage());
     }
   }
 
-  /** Parses a bare {@code name <value>} line from a Prometheus text-format scrape. */
-  private static double parsePrometheusGauge(String metrics, String name) {
-    for (String line : metrics.split("\n")) {
-      if (line.startsWith(name + " ") && !line.startsWith("#")) {
-        try {
-          return Double.parseDouble(line.substring(name.length()).trim());
-        } catch (NumberFormatException ignored) {
-          // fall through → return 0
-        }
-      }
-    }
-    return 0.0;
+  /** Reads a gauge value from the Micrometer globalRegistry. Returns 0.0 if not found. */
+  static double getGaugeValue(String name) {
+    Gauge gauge = Metrics.globalRegistry.find(name).gauge();
+    return gauge != null ? gauge.value() : 0.0;
   }
 
   @Override
@@ -241,10 +236,6 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   }
 
   private boolean scaleDeployment(String deploymentName, int scaleDelta, int maxReplicas) {
-    if (scaleDelta == 0) {
-      return true;
-    }
-
     try {
       StatefulSet sts =
           k8sClient.apps().statefulSets().inNamespace(namespace).withName(deploymentName).get();
@@ -301,6 +292,12 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
       logger.error("Failed to scale {}: {}", deploymentName, e.getMessage(), e);
       return false;
     }
+  }
+
+  @Override
+  public void armIdleGuard() {
+    jobSeenSinceScaleUp = false;
+    idlePollCount.set(0);
   }
 
   @Override

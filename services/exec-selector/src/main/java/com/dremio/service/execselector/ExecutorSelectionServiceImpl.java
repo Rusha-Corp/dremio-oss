@@ -177,42 +177,61 @@ public class ExecutorSelectionServiceImpl implements ExecutorSelectionService {
         executorSelectionContext.getResourceSchedulingDecisionInfo();
     EngineId engineId = null;
     SubEngineId subEngineId = null;
-    String requiredTag = null;
     if (decision != null) {
       engineId = decision.getEngineId();
       subEngineId = decision.getSubEngineId();
-      // Route jobs to executors whose node-tag matches the assigned queue tier.
-      // decision.getQueueName() returns the QueueType enum name: LARGE, SMALL, etc.
-      // LOW_COST system queries default to the small tier.
-      String q = decision.getQueueName();
-      if ("LARGE".equals(q) || "REFLECTION_LARGE".equals(q)) {
-        requiredTag = "large";
-      } else if ("SMALL".equals(q) || "REFLECTION_SMALL".equals(q) || "LOW_COST".equals(q)) {
-        requiredTag = "small";
-      }
     }
     Set<NodeEndpoint> endpoints = getAvailableEndpoints(engineId, subEngineId);
-    if (requiredTag != null) {
-      final String tag = requiredTag;
-      Set<NodeEndpoint> tagged =
-          endpoints.stream()
-              .filter(ep -> tag.equals(ep.getNodeTag()))
-              .collect(Collectors.collectingAndThen(Collectors.toSet(), ImmutableSet::copyOf));
-      if (!tagged.isEmpty()) {
-        return new ExecutorSelectionHandleImpl(tagged);
-      }
-      // No tagged executors found — fall back to all available endpoints.
-      // Scaling/waiting was handled at resource-allocation time (ElasticResourceAllocator).
-      // If we reach here without tagged executors, something unexpected happened;
-      // log a warning and use whatever is available rather than crashing the query.
-      String queueName = decision != null ? decision.getQueueName() : "unknown";
-      logger.warn(
-          "No '{}'-tagged executors found for queue '{}'. Falling back to all available executors.",
-          tag,
-          queueName);
-      return new ExecutorSelectionHandleImpl(endpoints);
+    return new ExecutorSelectionHandleImpl(applyTagFilter(endpoints, decision));
+  }
+
+  /**
+   * Filters endpoints by node-tag based on the queue tier from the scheduling decision. If the
+   * queue maps to a known tier (small/large), only returns executors with the matching node-tag. If
+   * no tagged executors are found, falls back to all endpoints with a warning. If the decision is
+   * null or the queue name is unrecognized, returns all endpoints unfiltered.
+   */
+  @VisibleForTesting
+  Set<NodeEndpoint> applyTagFilter(
+      Set<NodeEndpoint> endpoints, ResourceSchedulingDecisionInfo decision) {
+    if (decision == null) {
+      return endpoints;
     }
-    return new ExecutorSelectionHandleImpl(endpoints);
+    String requiredTag = getRequiredTag(decision.getQueueName());
+    if (requiredTag == null) {
+      return endpoints;
+    }
+    final String tag = requiredTag;
+    Set<NodeEndpoint> tagged =
+        endpoints.stream()
+            .filter(ep -> tag.equals(ep.getNodeTag()))
+            .collect(Collectors.collectingAndThen(Collectors.toSet(), ImmutableSet::copyOf));
+    if (!tagged.isEmpty()) {
+      return tagged;
+    }
+    // No tagged executors found — fall back to all available endpoints.
+    // Scaling/waiting was handled at resource-allocation time (ElasticResourceAllocator).
+    // If we reach here without tagged executors, something unexpected happened;
+    // log a warning and use whatever is available rather than crashing the query.
+    logger.warn(
+        "No '{}'-tagged executors found for queue '{}'. Falling back to all available executors.",
+        tag,
+        decision.getQueueName());
+    return endpoints;
+  }
+
+  /** Maps a queue name to the required executor node-tag, or null if no filtering is needed. */
+  private static String getRequiredTag(String queueName) {
+    if (queueName == null) {
+      return null;
+    }
+    if ("LARGE".equals(queueName) || "REFLECTION_LARGE".equals(queueName)) {
+      return "large";
+    }
+    if ("SMALL".equals(queueName) || "REFLECTION_SMALL".equals(queueName) || "LOW_COST".equals(queueName)) {
+      return "small";
+    }
+    return null;
   }
 
   private ListenableSet getExecutorSet(EngineId engineId, SubEngineId subEngineId) {
@@ -230,7 +249,17 @@ public class ExecutorSelectionServiceImpl implements ExecutorSelectionService {
       try (final AutoCloseableLock ignored = new AutoCloseableLock(rwLock.readLock()).open()) {
         if (optionsProvider.get().getOption(EXECUTOR_SELECTION_TYPE).equals(selectorType)) {
           // Common case: option stayed the same
-          return selector.getExecutors(desiredNumExecutors, executorSelectionContext);
+          ExecutorSelectionHandle handle =
+              selector.getExecutors(desiredNumExecutors, executorSelectionContext);
+          // Apply tag filtering so that non-hard-affinity queries also respect the
+          // tier routing. Without this, getExecutors() returns all registered
+          // executors regardless of node-tag, causing large queries to be assigned
+          // to small executors (and vice versa).
+          Set<NodeEndpoint> filtered =
+              applyTagFilter(
+                  ImmutableSet.copyOf(handle.getExecutors()),
+                  executorSelectionContext.getResourceSchedulingDecisionInfo());
+          return new ExecutorSelectionHandleImpl(filtered);
         }
       }
 

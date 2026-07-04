@@ -109,4 +109,43 @@ public class ElasticAdmissionCalculatorTest {
         ElasticAdmissionCalculator.ExecutorTier.LARGE,
         calculator.getTier(50_000_000, null));
   }
+
+  // ---- 3-arg getTier with queue threshold override ----
+
+  @Test
+  public void testGetTierWithOverrideThresholdSmall() {
+    // cost 20M with override threshold 30M -> SMALL (20M <= 30M)
+    // even though the default smallQueryThreshold (10M) would classify it as LARGE
+    assertEquals(
+        ElasticAdmissionCalculator.ExecutorTier.SMALL,
+        calculator.getTier(20_000_000, null, 30_000_000));
+  }
+
+  @Test
+  public void testGetTierWithOverrideThresholdLarge() {
+    // cost 35M with override threshold 30M -> LARGE (35M > 30M)
+    assertEquals(
+        ElasticAdmissionCalculator.ExecutorTier.LARGE,
+        calculator.getTier(35_000_000, null, 30_000_000));
+  }
+
+  @Test
+  public void testGetTierWithOverrideThresholdLargeQueueOverrides() {
+    // "large" queue name overrides regardless of cost or threshold
+    assertEquals(
+        ElasticAdmissionCalculator.ExecutorTier.LARGE,
+        calculator.getTier(100, "query.large", 30_000_000));
+  }
+
+  @Test
+  public void testGetTierWithOverrideThresholdAlignsWithQueueThreshold() {
+    // Key alignment test: cost 15M with threshold 30M -> SMALL
+    // but same cost with threshold 10M -> LARGE
+    assertEquals(
+        ElasticAdmissionCalculator.ExecutorTier.SMALL,
+        calculator.getTier(15_000_000, null, 30_000_000));
+    assertEquals(
+        ElasticAdmissionCalculator.ExecutorTier.LARGE,
+        calculator.getTier(15_000_000, null, 10_000_000));
+  }
 }

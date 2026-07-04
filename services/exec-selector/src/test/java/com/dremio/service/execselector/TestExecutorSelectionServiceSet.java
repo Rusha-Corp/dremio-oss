@@ -63,6 +63,13 @@ public class TestExecutorSelectionServiceSet implements ServiceSet {
     testAddNode(address, DremioVersionInfo.getVersion());
   }
 
+  void testAddNode(NodeEndpoint endpoint) {
+    endpoints.add(endpoint);
+    if (listener != null) {
+      listener.nodesRegistered(ImmutableSet.of(endpoint));
+    }
+  }
+
   void testAddNode(String address, String dremioVersion) {
     NodeEndpoint newNode =
         NodeEndpoint.newBuilder().setAddress(address).setDremioVersion(dremioVersion).build();

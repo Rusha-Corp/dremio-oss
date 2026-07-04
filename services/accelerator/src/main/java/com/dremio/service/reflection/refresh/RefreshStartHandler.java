@@ -21,7 +21,6 @@ import static com.dremio.service.reflection.ReflectionUtils.getId;
 
 import com.dremio.exec.store.CatalogService;
 import com.dremio.options.OptionManager;
-import com.dremio.resource.common.ReflectionRoutingManager;
 import com.dremio.service.job.proto.JobId;
 import com.dremio.service.job.proto.QueryType;
 import com.dremio.service.jobs.JobStatusListener;
@@ -216,19 +215,9 @@ public class RefreshStartHandler {
   }
 
   public String getRefreshRoutingQueue(ReflectionEntry entry) {
-    final DatasetConfig datasetConfig = ReflectionUtils.getAnchorDataset(catalogService, entry);
-    final ReflectionRoutingManager reflectionRoutingManager =
-        catalogService.getSystemUserCatalog().getContext().getReflectionRoutingManager();
-    if (reflectionRoutingManager == null || !reflectionRoutingManager.getIsQueue()) {
-      return null;
-    }
-
-    String queueId = datasetConfig.getQueueId();
-    if (queueId == null) {
-      return null;
-    }
-
-    return reflectionRoutingManager.getQueueNameById(queueId);
+    // Reflection queue routing requires Catalog.getContext() which is not available
+    // in this build. Return null to use the default queue.
+    return null;
   }
 
   protected ReflectionGoalsStore getReflectionGoalsStore() {

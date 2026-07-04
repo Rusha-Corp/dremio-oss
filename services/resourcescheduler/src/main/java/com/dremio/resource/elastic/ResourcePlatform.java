@@ -105,6 +105,17 @@ public interface ResourcePlatform extends AutoCloseable {
     return waitForExecutors(requiredExecutors, timeout, unit);
   }
 
+  /**
+   * Arms the idle-reset guard to prevent premature scale-down during executor cold-start.
+   *
+   * <p>Call this before any scale-up request to ensure the idle-reset scheduler does not clear the
+   * {@code elastic_desired_*} gauges while executors are still starting up. The guard is
+   * automatically disarmed when {@code jobs_active > 0 || maestro_active > 0} is observed.
+   *
+   * <p>Default no-op for implementations that do not use an idle-reset scheduler.
+   */
+  default void armIdleGuard() {}
+
   @Override
   default void close() throws Exception {}
 }

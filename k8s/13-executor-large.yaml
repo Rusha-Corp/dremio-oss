@@ -1,3 +1,13 @@
+# StatefulSet for dremio-executor-large.
+# Created with replicas: 0 so KEDA's ScaledObject has a valid scaleTargetRef from day 0.
+# KEDA scales this StatefulSet based on the executor_desired_large metric.
+#
+# Uses a shared ReadWriteMany PVC for paths.dist (same as coordinator)
+# and a per-pod volumeClaimTemplate for local spill/cache data.
+#
+# Sizing matches AWS i4i.2xlarge: 8 vCPU, 64 GiB RAM, NVMe storage.
+# JVM split: 8 GB heap / 52 GB direct = 60 GB total, 4 GB for OS/JVM overhead.
+# nodeSelector pins pods to NVMe nodes labeled workload=dremio-large.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -8,16 +18,18 @@ metadata:
     role: executor
     tier: large
 spec:
+  updateStrategy:
+    type: OnDelete
   persistentVolumeClaimRetentionPolicy:
     whenDeleted: Retain
     whenScaled: Delete
+  serviceName: dremio-executor
   replicas: 0
   selector:
     matchLabels:
       app: dremio
       role: executor
       tier: large
-  serviceName: dremio-executor
   template:
     metadata:
       labels:
@@ -27,73 +39,73 @@ spec:
     spec:
       containers:
         - name: executor
-          image: ghcr.io/rusha-corp/dremio-oss:2026.05.7
+          image: ghcr.io/rusha-corp/dremio-oss:2026.06.2
           imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
           env:
             - name: DREMIO_CONF_DIR
-              value: /opt/dremio/conf
-            - name: POD_IP
+              value: "/opt/dremio/conf"
+            # Use stable StatefulSet DNS hostname as the fabric address.
+            # This ensures executors register with a stable DNS name instead of a
+            # volatile pod IP, preventing "No executors available for data with hard
+            # affinity" errors when executors are recreated with new IPs.
+            - name: POD_NAME
               valueFrom:
                 fieldRef:
-                  fieldPath: status.podIP
-            - name: DREMIO_MAX_MEMORY_SIZE_MB
-              value: "20480"
+                  fieldPath: metadata.name
+            - name: POD_IP
+              value: "$(POD_NAME).dremio-executor.dremio.svc.cluster.local"
+            # Do NOT use DREMIO_JAVA_OPTS for -Xmx; the dremio launcher resets
+            # DREMIO_JAVA_OPTS and re-appends -Xmx/-XX:MaxDirectMemorySize from
+            # DREMIO_MAX_HEAP_MEMORY_SIZE_MB / DREMIO_MAX_DIRECT_MEMORY_SIZE_MB.
+            # i4i.2xlarge split: 8 GB heap / 52 GB direct = 60 GB JVM, 4 GB OS.
+            - name: DREMIO_MAX_HEAP_MEMORY_SIZE_MB
+              value: "8192"
+            - name: DREMIO_MAX_DIRECT_MEMORY_SIZE_MB
+              value: "53248"
+          volumeMounts:
+            - name: dremio-config
+              mountPath: /opt/dremio/conf
+            - name: dremio-dist
+              mountPath: /opt/dremio/dist
+            - name: dremio-local
+              mountPath: /opt/dremio/data
+          resources:
+            requests:
+              cpu: "8"
+              memory: "62Gi"
+              ephemeral-storage: "50Gi"
+            limits:
+              cpu: "8"
+              memory: "62Gi"
+              ephemeral-storage: "100Gi"
           lifecycle:
             preStop:
               exec:
-                command:
-                  - sh
-                  - -c
-                  - sleep 120
-          ports:
-            - containerPort: 45678
-              name: inter-node
-          readinessProbe:
-            tcpSocket:
-              port: 45678
-            failureThreshold: 3
-            initialDelaySeconds: 60
-            periodSeconds: 10
-            successThreshold: 1
-            timeoutSeconds: 5
-          startupProbe:
-            tcpSocket:
-              port: 45678
-            failureThreshold: 300
-            periodSeconds: 2
-          resources:
-            limits:
-              cpu: "4"
-              ephemeral-storage: 60Gi
-              memory: 24Gi
-            requests:
-              cpu: "2"
-              ephemeral-storage: 30Gi
-              memory: 10Gi
-          securityContext:
-            runAsGroup: 0
-            runAsUser: 0
-          volumeMounts:
-            - mountPath: /opt/dremio/conf
-              name: dremio-config
-            - mountPath: /opt/dremio/dist
-              name: dremio-dist
-            - mountPath: /opt/dremio/data
-              name: dremio-local
-      imagePullSecrets:
-        - name: ghcr-secret
-      nodeSelector:
-        kubernetes.io/hostname: vmi1594378.contaboserver.net
+                command: ["sh", "-c", "sleep 120"]
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: dremio
+                    role: executor
+                topologyKey: kubernetes.io/hostname
       securityContext:
         fsGroup: 0
-      serviceAccount: dremio-elastic
-      serviceAccountName: dremio-elastic
       subdomain: dremio-executor
+      imagePullSecrets:
+        - name: ghcr-secret
+      serviceAccountName: dremio-elastic
       terminationGracePeriodSeconds: 1800
       volumes:
-        - configMap:
+        - name: dremio-config
+          configMap:
             name: dremio-executor-config-large
-          name: dremio-config
         - name: dremio-dist
           persistentVolumeClaim:
             claimName: dremio-dist
@@ -103,7 +115,7 @@ spec:
       spec:
         accessModes:
           - ReadWriteOnce
+        storageClassName: longhorn
         resources:
           requests:
             storage: 100Gi
-        storageClassName: longhorn

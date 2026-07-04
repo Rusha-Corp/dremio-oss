@@ -175,6 +175,7 @@ import com.dremio.resource.QueryCancelTool;
 import com.dremio.resource.ResourceAllocator;
 import com.dremio.resource.RuleBasedEngineSelector;
 import com.dremio.resource.basic.BasicResourceAllocator;
+import com.dremio.resource.elastic.ElasticAdmissionCalculator;
 import com.dremio.resource.elastic.ElasticResourceAllocator;
 import com.dremio.resource.elastic.ResourcePlatform;
 import com.dremio.resource.elastic.ResourcePlatformProvider;
@@ -1226,11 +1227,54 @@ public class DACDaemonModule implements DACModule {
           ProvisioningService.class, createProvisioningService(registry, isCoordinator, isMaster));
     }
 
-    // Bind ResourcePlatformProvider for elastic scaling
+    // Bind ResourcePlatformProvider for elastic scaling.
+    // Bind as both the Provider type and the ResourcePlatform interface type
+    // so that ElasticResourceAllocator's Provider<ResourcePlatform> can resolve it
+    // and other code can look up ResourcePlatform from the registry.
     ResourcePlatformProvider resourcePlatformProvider =
         new ResourcePlatformProvider(config, registry.provider(ClusterCoordinator.class));
     registry.bind(ResourcePlatformProvider.class, resourcePlatformProvider);
-    registry.bind(ResourcePlatform.class, resourcePlatformProvider);
+    registry.bind(ResourcePlatform.class, new ResourcePlatform() {
+      @Override
+      public int getAvailableExecutors() {
+        return resourcePlatformProvider.get().getAvailableExecutors();
+      }
+      @Override
+      public boolean waitForExecutors(int requiredExecutors, long timeout, TimeUnit unit)
+          throws InterruptedException {
+        return resourcePlatformProvider.get().waitForExecutors(requiredExecutors, timeout, unit);
+      }
+      @Override
+      public boolean scaleExecutors(int scaleDelta) {
+        return resourcePlatformProvider.get().scaleExecutors(scaleDelta);
+      }
+      @Override
+      public boolean scaleExecutors(int scaleDelta, ElasticAdmissionCalculator.ExecutorTier tier) {
+        return resourcePlatformProvider.get().scaleExecutors(scaleDelta, tier);
+      }
+      @Override
+      public int getAvailableExecutors(ElasticAdmissionCalculator.ExecutorTier tier) {
+        return resourcePlatformProvider.get().getAvailableExecutors(tier);
+      }
+      @Override
+      public boolean waitForExecutors(
+          int requiredExecutors, ElasticAdmissionCalculator.ExecutorTier tier, long timeout, TimeUnit unit)
+          throws InterruptedException {
+        return resourcePlatformProvider.get().waitForExecutors(requiredExecutors, tier, timeout, unit);
+      }
+      @Override
+      public void close() {
+        try {
+          resourcePlatformProvider.close();
+        } catch (IOException e) {
+          // Ignore close errors
+        }
+      }
+      @Override
+      public void armIdleGuard() {
+        resourcePlatformProvider.get().armIdleGuard();
+      }
+    });
 
     // Check if elastic scaling is enabled
     boolean elasticEnabled = config.getBoolean(DremioConfig.ELASTIC_ENABLED);

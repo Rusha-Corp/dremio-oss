@@ -31,18 +31,20 @@ spec:
     # Primary: coordinator's published desired count drives replica count
     - type: prometheus
       metadata:
-        serverAddress: http://prometheus.rusha.svc.cluster.local:9090
+        serverAddress: http://prometheus.dremio.svc.cluster.local:9090
         metricName: elastic_desired_small
         query: "elastic_desired_small"
         threshold: "1"
         activationThreshold: "0"
-    # Guard: keep at least 1 while any job, query plan, or reflection is active.
-    # KEDA takes the max across all triggers, so this holds the tier alive even
-    # during the 30s idle-reset window after coordinator's metric drops to 0.
+    # Guard: keep at least 1 while any work is active on small tier
+    # (jobs, maestro sessions, reflections). Prevents KEDA from scaling
+    # down during the idle-reset window or cooldown period.
+    # Uses total reflections_active + reflections_refreshing (not tier-specific)
+    # because the tier-specific reflection metrics are not yet deployed.
     - type: prometheus
       metadata:
-        serverAddress: http://prometheus.rusha.svc.cluster.local:9090
+        serverAddress: http://prometheus.dremio.svc.cluster.local:9090
         metricName: dremio_work_active_small
-        query: "clamp_min(jobs_active_small + maestro_active_small + reflections_active_small, 0)"
+        query: "clamp_max(jobs_active_small + maestro_active_small + reflections_active + reflections_refreshing, 1)"
         threshold: "1"
         activationThreshold: "0"

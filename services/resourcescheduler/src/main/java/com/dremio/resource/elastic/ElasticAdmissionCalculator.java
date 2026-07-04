@@ -83,6 +83,26 @@ public class ElasticAdmissionCalculator {
   }
 
   /**
+   * Returns the executor tier using an explicit queue threshold override. This ensures the elastic
+   * tier classification matches the BasicResourceAllocator queue classification, which uses
+   * {@code exec.queue.threshold} (QUEUE_THRESHOLD_SIZE). Without this alignment, a query with cost
+   * between the elastic smallQueryThreshold and the queue threshold would be classified as LARGE by
+   * the elastic allocator but SMALL by the queue allocator, causing fragment routing to the wrong
+   * executor tier.
+   *
+   * @param planCost the estimated query cost from PhysicalPlan.getCost()
+   * @param routingQueue the routing queue name (e.g. "query.large", "query.small")
+   * @param queueThreshold the override threshold (typically from exec.queue.threshold option)
+   * @return ExecutorTier (LARGE if queue contains "large" or cost > threshold, otherwise SMALL)
+   */
+  public ExecutorTier getTier(double planCost, String routingQueue, double queueThreshold) {
+    if (routingQueue != null && routingQueue.toLowerCase().contains("large")) {
+      return ExecutorTier.LARGE;
+    }
+    return planCost <= queueThreshold ? ExecutorTier.SMALL : ExecutorTier.LARGE;
+  }
+
+  /**
    * Calculates how many additional executors need to be scaled up.
    *
    * @param requiredExecutors total executors needed

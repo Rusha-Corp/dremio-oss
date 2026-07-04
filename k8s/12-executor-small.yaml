@@ -8,6 +8,8 @@ metadata:
     role: executor
     tier: small
 spec:
+  updateStrategy:
+    type: OnDelete
   persistentVolumeClaimRetentionPolicy:
     whenDeleted: Retain
     whenScaled: Delete
@@ -27,17 +29,29 @@ spec:
     spec:
       containers:
         - name: executor
-          image: ghcr.io/rusha-corp/dremio-oss:2026.05.7
+          image: ghcr.io/rusha-corp/dremio-oss:2026.06.2
           imagePullPolicy: Always
           env:
             - name: DREMIO_CONF_DIR
               value: /opt/dremio/conf
-            - name: POD_IP
+            # Use stable StatefulSet DNS hostname as the fabric address.
+            # This ensures executors register with a stable DNS name instead of a
+            # volatile pod IP, preventing "No executors available for data with hard
+            # affinity" errors when executors are recreated with new IPs.
+            - name: POD_NAME
               valueFrom:
                 fieldRef:
-                  fieldPath: status.podIP
-            - name: DREMIO_MAX_MEMORY_SIZE_MB
-              value: "6144"
+                  fieldPath: metadata.name
+            - name: POD_IP
+              value: "$(POD_NAME).dremio-executor.dremio.svc.cluster.local"
+            # Do NOT use DREMIO_JAVA_OPTS for -Xmx; the dremio launcher resets
+            # DREMIO_JAVA_OPTS and re-appends -Xmx/-XX:MaxDirectMemorySize from
+            # DREMIO_MAX_HEAP_MEMORY_SIZE_MB / DREMIO_MAX_DIRECT_MEMORY_SIZE_MB.
+            # t3a.xlarge split: 4 GB heap / 11 GB direct = 15 GB JVM, 1 GB for OS.
+            - name: DREMIO_MAX_HEAP_MEMORY_SIZE_MB
+              value: "4096"
+            - name: DREMIO_MAX_DIRECT_MEMORY_SIZE_MB
+              value: "11264"
           lifecycle:
             preStop:
               exec:
@@ -63,13 +77,13 @@ spec:
             periodSeconds: 2
           resources:
             limits:
-              cpu: "2"
-              ephemeral-storage: 30Gi
-              memory: 8Gi
+              cpu: "4"
+              ephemeral-storage: 20Gi
+              memory: 15Gi
             requests:
-              cpu: 500m
-              ephemeral-storage: 15Gi
-              memory: 4Gi
+              cpu: "4"
+              ephemeral-storage: 5Gi
+              memory: 15Gi
           securityContext:
             runAsGroup: 0
             runAsUser: 0
@@ -80,10 +94,18 @@ spec:
               name: dremio-dist
             - mountPath: /opt/dremio/data
               name: dremio-local
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: dremio
+                    role: executor
+                topologyKey: kubernetes.io/hostname
       imagePullSecrets:
         - name: ghcr-secret
-      nodeSelector:
-        kubernetes.io/hostname: vmi1594378.contaboserver.net
       securityContext:
         fsGroup: 0
       serviceAccount: dremio-elastic

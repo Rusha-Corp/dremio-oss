@@ -20,7 +20,7 @@ spec:
               value: 2
           stabilizationWindowSeconds: 0
   cooldownPeriod: 600
-  maxReplicaCount: 8
+  maxReplicaCount: 3
   minReplicaCount: 0
   pollingInterval: 10
   scaleTargetRef:
@@ -31,18 +31,20 @@ spec:
     # Primary: coordinator's published desired count drives replica count
     - type: prometheus
       metadata:
-        serverAddress: http://prometheus.rusha.svc.cluster.local:9090
+        serverAddress: http://prometheus.dremio.svc.cluster.local:9090
         metricName: elastic_desired_large
         query: "elastic_desired_large"
         threshold: "1"
         activationThreshold: "0"
-    # Guard: keep at least 1 while any job or query plan is active.
-    # KEDA takes the max across all triggers, so this holds the tier alive even
-    # during the 30s idle-reset window after coordinator's metric drops to 0.
+    # Guard: keep at least 1 while ANY work is active (jobs, maestro, reflections).
+    # Uses total jobs_active + maestro_active (not tier-specific) because small-tier
+    # queries can fall back to large executors via ExecutorSelectionServiceImpl
+    # fallback routing. Uses total reflections_active + reflections_refreshing
+    # because the tier-specific reflection metrics are not yet deployed.
     - type: prometheus
       metadata:
-        serverAddress: http://prometheus.rusha.svc.cluster.local:9090
+        serverAddress: http://prometheus.dremio.svc.cluster.local:9090
         metricName: dremio_work_active_large
-        query: "clamp_min(jobs_active_large + maestro_active_large + reflections_active_large, 0)"
+        query: "clamp_max(jobs_active + maestro_active + reflections_active + reflections_refreshing, 1)"
         threshold: "1"
         activationThreshold: "0"

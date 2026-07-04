@@ -20,6 +20,10 @@ RUN tar xfz /tmp/dremio-distribution.tar.gz -C /opt/dremio --strip-components=1 
 COPY dremio-common-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
 COPY dremio-services-execselector-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
 COPY dremio-services-resourcescheduler-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
+COPY dremio-services-telemetry-api-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
+COPY dremio-sabot-kernel-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
+COPY dremio-services-accelerator-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
+COPY dremio-dac-backend-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
 
 EXPOSE 9047/tcp 31010/tcp 32010/tcp 45678/tcp
 

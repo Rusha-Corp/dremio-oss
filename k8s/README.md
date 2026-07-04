@@ -10,14 +10,14 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 
 | Component | Version / Config |
 |-----------|-----------------|
-| Kubernetes | k3s on a single node (`vmi1594378.contaboserver.net`) |
+| Kubernetes | k3s on a multi-node cluster (4 workers + 1 control-plane) |
 | Storage | Longhorn (all PVCs use `storageClassName: longhorn`) |
-| Dremio OSS | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` |
+| Dremio OSS | `ghcr.io/rusha-corp/dremio-oss:2026.06.2` |
 | KEDA | v2.x operator installed on cluster |
 | Prometheus | Deployed in `rusha` namespace, scrapes coordinator every 5s |
-| Coordinator | 1 pod, 4Gi heap |
-| Small executors | KEDA-managed StatefulSet, 4Gi heap, 15Gi/30Gi ephemeral-storage, 30Gi data PVC |
-| Large executors | KEDA-managed StatefulSet, 20Gi heap, 30Gi/60Gi ephemeral-storage, 100Gi data PVC |
+| Coordinator | 1 pod, 2.5 GB heap / 1 GB direct (on vmi1594378) |
+| Small executors | KEDA-managed StatefulSet, 4 vCPU / 15Gi (t3a.xlarge-equiv), anti-affinity, 30Gi spill PVC |
+| Large executors | KEDA-managed StatefulSet, 8 vCPU / 62Gi (i4i.2xlarge-equiv), anti-affinity, 100Gi spill PVC |
 
 ## Images
 
@@ -418,14 +418,16 @@ COPY dremio-services-resourcescheduler-26.0.5-...jar /opt/dremio/jars/
 
 ## Executor JVM Memory Configuration
 
-Executors **must** have `DREMIO_MAX_MEMORY_SIZE_MB` set to prevent OOMKills. Dremio's startup script calculates `-Xmx` and `-XX:MaxDirectMemorySize` from this value.
+Executors **must** set `DREMIO_MAX_HEAP_MEMORY_SIZE_MB` and `DREMIO_MAX_DIRECT_MEMORY_SIZE_MB` explicitly. Dremio's startup script (`bin/dremio-config`) resets `DREMIO_JAVA_OPTS` and then appends `-Xmx` and `-XX:MaxDirectMemorySize` derived from these two env vars. Setting `-Xmx` in `DREMIO_JAVA_OPTS` is **silently discarded** — the launcher's defaults (4 GB heap / 8 GB direct) will apply instead.
 
-> **Warning:** Do NOT use `DREMIO_JAVA_OPTS` for heap settings. The Dremio startup script overrides `-Xmx` and `-XX:MaxDirectMemorySize` based on `DREMIO_MAX_MEMORY_SIZE_MB`.
+> **Warning:** Do NOT use `DREMIO_JAVA_OPTS` for heap/direct memory settings. The Dremio startup script resets this variable and re-appends `-Xmx${DREMIO_MAX_HEAP_MEMORY_SIZE_MB}m -XX:MaxDirectMemorySize=${DREMIO_MAX_DIRECT_MEMORY_SIZE_MB}m` from the dedicated env vars. Always use `DREMIO_MAX_HEAP_MEMORY_SIZE_MB` and `DREMIO_MAX_DIRECT_MEMORY_SIZE_MB` (or `DREMIO_MAX_MEMORY_SIZE_MB` which auto-splits) instead.
 
-| Tier | Memory Request | Memory Limit | DREMIO_MAX_MEMORY_SIZE_MB | Ephemeral-Storage Request | Ephemeral-Storage Limit |
-|------|----------------|--------------|---------------------------|--------------------------|------------------------|
-| small | 4Gi | 8Gi | 6144 | 15Gi | 30Gi |
-| large | 20Gi | 24Gi | 20480 | 30Gi | 60Gi |
+> **Per official Dremio docs:** leave 1-2 GB for the OS. Direct memory is what query operators (hash join, hash agg, external sort, TopN) actually consume; the Memory Arbiter tracks and manages direct memory for these operators. Heap is used for DML writers, metadata, and planner state. For ETL-heavy workloads (MERGE, COPY INTO), favor direct memory.
+
+| Tier | Memory Request | Memory Limit | Heap (MB) | Direct (MB) | Total JVM (MB) | OS Headroom | Ephemeral-Storage Request | Ephemeral-Storage Limit | PVC | vCPU | AWS Equiv |
+|------|----------------|--------------|-----------|-------------|----------------|-------------|--------------------------|------------------------|-----|------|-----------|
+| small | 15Gi | 15Gi | 4096 | 11264 | 15360 | ~1 Gi | 5Gi | 10Gi | 20Gi | 4 | t3a.xlarge |
+| large | 62Gi | 62Gi | 8192 | 53248 | 61440 | ~4 Gi | 50Gi | 100Gi | 500Gi | 8 | i4i.2xlarge |
 
 ## Nessie Token Rotation
 
@@ -439,6 +441,149 @@ kubectl create secret generic nessie-token-rotator-secret \
   --from-literal=OAUTH2_CLIENT_SECRET=<cognito-client-secret>
 ```
 
+## Kubeconfig Setup (Cognito OIDC)
+
+The k3s API server authenticates via AWS Cognito OIDC. To create a kubeconfig from any machine:
+
+### Prerequisites
+
+- `kubectl` installed
+- `openssl` installed
+- Python 3 with standard library (for HMAC calculation)
+- Cognito credentials (client ID, client secret, username, password)
+
+### Environment Variables
+
+```bash
+export RUSHA_K8S_SERVER=https://213.199.60.26:6443
+export RUSHA_K8S_COGNITO_REGION=eu-west-2
+export RUSHA_K8S_COGNITO_CLIENT_ID=73r8agt15158to5n7ei7uukvql
+export RUSHA_K8S_COGNITO_CLIENT_SECRET=<your-client-secret>
+export RUSHA_K8S_COGNITO_USERNAME=<your-username>
+export RUSHA_K8S_COGNITO_PASSWORD=<your-password>
+```
+
+### One-Command Kubeconfig Generation
+
+This script authenticates with Cognito, fetches OIDC tokens, extracts the k3s CA certificate, and writes a kubeconfig to `~/.kube/k3s.yaml`:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# --- Config ---
+K3S_SERVER="https://213.199.60.26:6443"
+COGNITO_REGION="eu-west-2"
+COGNITO_CLIENT_ID="${RUSHA_K8S_COGNITO_CLIENT_ID}"
+COGNITO_CLIENT_SECRET="${RUSHA_K8S_COGNITO_CLIENT_SECRET}"
+COGNITO_USERNAME="${RUSHA_K8S_COGNITO_USERNAME}"
+COGNITO_PASSWORD="${RUSHA_K8S_COGNITO_PASSWORD}"
+KUBECONFIG_FILE="${HOME}/.kube/k3s.yaml"
+
+# Cognito User Pool ID (from the OIDC issuer URL)
+COGNITO_USER_POOL_ID="eu-west-2_YcLwmCOqe"
+OIDC_ISSUER="https://cognito-idp.${COGNITO_REGION}.amazonaws.com/${COGNITO_USER_POOL_ID}"
+
+# --- 1. Calculate SECRET_HASH ---
+SECRET_HASH=$(echo -n "${COGNITO_USERNAME}${COGNITO_CLIENT_ID}" \
+  | openssl dgst -sha256 -hmac "${COGNITO_CLIENT_SECRET}" -binary \
+  | base64)
+
+# --- 2. Authenticate with Cognito (USER_PASSWORD_AUTH) ---
+AUTH_RESPONSE=$(python3 -c "
+import json, urllib.request, ssl, base64, hashlib, hmac
+
+client_id = '${COGNITO_CLIENT_ID}'
+client_secret = '${COGNITO_CLIENT_SECRET}'
+username = '${COGNITO_USERNAME}'
+password = '${COGNITO_PASSWORD}'
+secret_hash = '${SECRET_HASH}'
+
+message = username + client_id
+computed_hash = base64.b64encode(
+    hmac.new(client_secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()
+).decode('utf-8')
+
+payload = json.dumps({
+    'ClientId': client_id,
+    'AuthFlow': 'USER_PASSWORD_AUTH',
+    'AuthParameters': {
+        'USERNAME': username,
+        'PASSWORD': password,
+        'SECRET_HASH': computed_hash
+    }
+}).encode('utf-8')
+
+ctx = ssl.create_default_context()
+req = urllib.request.Request(
+    'https://cognito-idp.${COGNITO_REGION}.amazonaws.com/',
+    data=payload,
+    headers={
+        'Content-Type': 'application/x-amz-json-1.1',
+        'X-Amz-Target': 'AWSCognitoIdentityProviderService.InitiateAuth'
+    }
+)
+
+resp = urllib.request.urlopen(req, context=ctx)
+result = json.loads(resp.read().decode())
+tokens = result['AuthenticationResult']
+print(json.dumps(tokens))
+")
+
+ID_TOKEN=$(echo "$AUTH_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['IdToken'])")
+REFRESH_TOKEN=$(echo "$AUTH_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['RefreshToken'])")
+
+# --- 3. Extract k3s API server CA certificate ---
+CA_DATA=$(echo -n | openssl s_client -connect 213.199.60.26:6443 -showcerts 2>/dev/null \
+  | openssl x509 -outform PEM 2>/dev/null \
+  | base64 -w0)
+
+# --- 4. Write kubeconfig ---
+mkdir -p "$(dirname "$KUBECONFIG_FILE")"
+
+cat > "$KUBECONFIG_FILE" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority-data: ${CA_DATA}
+    server: ${K3S_SERVER}
+  name: k3s-contabo62
+contexts:
+- context:
+    cluster: k3s-contabo62
+    user: cognito-user
+  name: k3s-contabo62
+current-context: k3s-contabo62
+preferences: {}
+users:
+- name: cognito-user
+  user:
+    auth-provider:
+      name: oidc
+      config:
+        client-id: ${COGNITO_CLIENT_ID}
+        client-secret: ${COGNITO_CLIENT_SECRET}
+        id-token: ${ID_TOKEN}
+        idp-issuer-url: ${OIDC_ISSUER}
+        refresh-token: ${REFRESH_TOKEN}
+EOF
+
+echo "Kubeconfig written to $KUBECONFIG_FILE"
+echo "Test with: KUBECONFIG=$KUBECONFIG_FILE kubectl get nodes"
+```
+
+### Token Refresh
+
+Cognito id_tokens expire after the configured TTL (default 8 hours per the dashboard setup). When the token expires, kubectl will prompt for re-authentication or you can re-run the script above to get fresh tokens.
+
+### Notes
+
+- The Cognito app client (`73r8agt15158to5n7ei7uukvql`) must have **USER_PASSWORD_AUTH** enabled in its allowed auth flows for this script to work.
+- The SECRET_HASH is computed as `Base64(HMAC-SHA256(client_secret, username + client_id))` per the [AWS Cognito spec](https://docs.aws.amazon.com/cognito/latest/developerguide/signing-up-users-in-your-app.html#cognito-user-pools-computing-secret-hash).
+- RBAC is configured via a ClusterRoleBinding (`cognito-dashboard-admins`) that maps Cognito users to cluster admin permissions.
+- The k3s API server OIDC configuration (`--oidc-issuer-url`, `--oidc-client-id`, etc.) must match the Cognito User Pool settings.
+
 ## Troubleshooting
 
 | Issue | Solution |
@@ -447,7 +592,7 @@ kubectl create secret generic nessie-token-rotator-secret \
 | Executor can't connect to coordinator | Verify DNS: `kubectl exec <executor-pod> -n dremio -c executor -- nslookup dremio-coordinator.dremio.svc.cluster.local` |
 | ImagePullBackOff | Recreate registry secret: `kubectl create secret docker-registry ghcr-secret --docker-server=ghcr.io --docker-username=$GHCR_USERNAME --docker-password=$GHCR_TOKEN --namespace=dremio` |
 | ConfigMap properties invalid | Use only properties supported by the base image version |
-| Executor OOMKilled | Ensure `DREMIO_MAX_MEMORY_SIZE_MB` env var is set and pod memory limit is sufficient |
+| Executor OOMKilled | Ensure `DREMIO_MAX_HEAP_MEMORY_SIZE_MB` and `DREMIO_MAX_DIRECT_MEMORY_SIZE_MB` env vars are set (NOT `DREMIO_JAVA_OPTS` — it is silently reset by the launcher). Pod memory limit must exceed the sum of heap + direct by 1-2 GB for OS overhead |
 | KEDA not scaling executors | Check ScaledObject status: `kubectl get scaledobject -n dremio`; verify Prometheus is scraping coordinator |
 | `elastic_desired_*` stuck at 0 | Gauges only appear after first scale event; submit a query to trigger initialization |
 | `elastic_desired_*` never resets after query | Coordinator idle-reset thread may be disabled or failing — check coordinator logs for `elastic-idle-reset` thread |
@@ -461,3 +606,28 @@ kubectl create secret generic nessie-token-rotator-secret \
 | KEDA sees 0, executors not scaling up | Verify Prometheus is scraping `:45679/metrics`; check `kubectl get scaledobject -n dremio` shows `ACTIVE: True` after query submitted |
 | Coordinator crashes: `properties were invalid` | Config key missing from `dremio-reference.conf` — ensure image is `2026.05.7`+ (see Pitfall #10) |
 | Query fails immediately after scale-up on cold start | Cold-start guard may be missing — ensure coordinator image is `2026.05.7`+ (see Pitfall #9) |
+
+## Dev vs Prod Node Scheduling
+
+### Dev (k3s playground)
+
+- **No nodeSelectors** on executor pods — any non-tainted worker can run any executor
+- **Pod anti-affinity** (preferred): spreads executor pods across different nodes when possible
+- **Node labels**: all workers have `dremio-large=true` and `dremio-small=true` (separate keys, not mutually exclusive)
+- **Control-plane node** (`vmi2936997`) has taint `node-role.kubernetes.io/control-plane:NoSchedule` — no executor pods can schedule there
+
+### Prod (AWS)
+
+- **Add nodeSelectors** to match instance types:
+  - Large executor: `nodeSelector: { dremio-large: "true", storage: nvme }`
+  - Small executor: `nodeSelector: { dremio-small: "true" }`
+- **Instance sizing enforces 1 executor per node**: i4i.2xlarge (64 GiB) fits exactly 1 large executor (62 GiB pod); t3a.xlarge (16 GiB) fits exactly 1 small executor (15 GiB pod)
+- **No anti-affinity needed** in prod — instance sizing prevents co-location
+- **KEDA `maxReplicaCount`** should match the ASG max capacity
+
+### Switching from dev to prod
+
+1. Add `nodeSelector` blocks to both executor StatefulSets
+2. Adjust `maxReplicaCount` in KEDA ScaledObjects to match ASG capacity
+3. Adjust `max_executors` / `max_executors_large` in coordinator configmap
+4. No other changes needed — the anti-affinity is `preferredDuringSchedulingIgnoredDuringExecution` so it degrades gracefully when nodeSelectors restrict placement

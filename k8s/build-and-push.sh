@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="${GHCR_REPO:-ghcr.io/rusha-corp/dremio-oss}"
-export DREMIO_VERSION="2026.05.7"
+export DREMIO_VERSION="2026.06.2"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARBALL_GLOB="$REPO_ROOT/distribution/server/target/dremio-community-*.tar.gz"
@@ -23,6 +23,9 @@ echo "=== Using tarball: $TARBALL ==="
 # 2. Stage tarball into k8s build context (remove old one first)
 rm -f "$SCRIPT_DIR/dremio-distribution.tar.gz"
 cp "$TARBALL" "$SCRIPT_DIR/dremio-distribution.tar.gz"
+
+# 2b. Stage overlay JARs from Maven build output
+cp "$REPO_ROOT/services/accelerator/target/dremio-services-accelerator-"*.jar "$SCRIPT_DIR/" 2>/dev/null || true
 
 # 3. Login to GHCR
 echo "=== Logging in to GHCR ==="

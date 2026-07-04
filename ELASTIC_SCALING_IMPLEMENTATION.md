@@ -27,15 +27,15 @@ Executors are tagged via `node-tag: "small"` or `node-tag: "large"` in their Con
 
 | Layer | Setting | Value | Purpose |
 |-------|---------|-------|---------|
-| K8sPlatform idle-reset | poll interval | 10s | Check `jobs_active` + `maestro_active` |
-| K8sPlatform idle-reset | threshold | 3 polls = 30s | Reset `elastic_desired_*` to 0 after idle |
+| K8sPlatform idle-reset | poll interval | 10s | Check `jobs.active` + `maestro.active` via Micrometer globalRegistry |
+| K8sPlatform idle-reset | threshold | 6 polls = 60s | Reset `elastic_desired_*` to 0 after idle |
 | KEDA ScaledObject | `cooldownPeriod` | 600s | Hold pods after INACTIVE signal |
 | KEDA HPA | `stabilizationWindowSeconds` (scale-down) | 300s | Smooth replica changes |
 | Executor pod | `terminationGracePeriodSeconds` | 1800s | Allow in-flight query completion |
 
 **Observed scale-down sequence from a fully loaded state:**
-1. Last query completes → `jobs_active=0`, `maestro_active=0`
-2. After 30s: idle-reset fires → `elastic_desired_small=0`, `elastic_desired_large=0`
+1. Last query completes → `jobs.active=0`, `maestro.active=0`
+2. After 60s: idle-reset fires → `elastic_desired_small=0`, `elastic_desired_large=0`
 3. KEDA guard trigger also drops to 0 → ScaledObject becomes INACTIVE
 4. After 600s cooldown: KEDA sets `spec.replicas=0`
 5. Pods enter `preStop` sleep (120s) then terminate
@@ -61,9 +61,10 @@ Executors are tagged via `node-tag: "small"` or `node-tag: "large"` in their Con
 │                                                                      │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │  K8sPlatform.checkAndResetIfIdle() [every 10s]                │  │
-│  │  - reads jobs_active, maestro_active from :45679/metrics      │  │
+│  │  - reads jobs.active, maestro.active from Micrometer           │  │
+│  │    globalRegistry (in-process, no HTTP)                       │  │
 │  │  - if both=0 and jobSeenSinceScaleUp=true:                    │  │
-│  │      idlePollCount++ → after 3 polls (30s): reset gauges to 0 │  │
+│  │      idlePollCount++ → after 6 polls (60s): reset gauges to 0 │  │
 │  │  - if both=0 and jobSeenSinceScaleUp=false: skip countdown    │  │
 │  │    (cold-start guard: executors provisioning, not yet ready)   │  │
 │  │  - if either>0: jobSeenSinceScaleUp=true, reset countdown     │  │
@@ -72,7 +73,8 @@ Executors are tagged via `node-tag: "small"` or `node-tag: "large"` in their Con
 │  Liveness endpoint: :45679/metrics                                   │
 │  - elastic_desired_small  (AtomicInteger gauge)                     │
 │  - elastic_desired_large  (AtomicInteger gauge)                     │
-│  - jobs_active, maestro_active, reflections_active                  │
+│  - jobs.active, maestro.active, reflections_active                  │
+│  (also accessible via Micrometer globalRegistry in-process)
 └─────────────────────────────────────────────────────────────────────┘
                     │
                     │ Prometheus scrape (5s interval)
@@ -247,9 +249,9 @@ Kubernetes implementation of `ResourcePlatform`. Uses Fabric8 to read StatefulSe
 **`checkAndResetIfIdle()` — background thread (every 10s):**
 
 ```
-Parse jobs_active, maestro_active from http://localhost:45679/metrics
+Read jobs.active, maestro.active from Micrometer globalRegistry
 
-if jobs_active > 0 OR maestro_active > 0:
+if jobs.active > 0 OR maestro.active > 0:
     jobSeenSinceScaleUp = true
     idlePollCount = 0
 
@@ -259,7 +261,7 @@ else if jobSeenSinceScaleUp = false:  (cold-start guard)
 
 else:
     idlePollCount++
-    if idlePollCount >= 3:  (30s threshold)
+    if idlePollCount >= 6:  (60s threshold)
         desiredSmall = 0
         desiredLarge = 0
         jobSeenSinceScaleUp = false  // re-arm for next cycle
@@ -361,12 +363,14 @@ triggers:
       activationThreshold: "0"
 
   # Guard: keeps executors alive while work is running,
-  # even during the 30s idle-reset window after elastic_desired drops to 0
+  # even during the 60s idle-reset window after elastic_desired drops to 0.
+  # Uses total reflections_active + reflections_refreshing (not tier-specific)
+  # because tier-specific reflection metrics are not yet deployed.
   - type: prometheus
     metadata:
       serverAddress: http://prometheus.<namespace>.svc.cluster.local:9090
       metricName: dremio_work_active_small
-      query: "clamp_min(jobs_active + maestro_active + reflections_active, 0)"
+      query: "clamp_max(jobs_active_small + maestro_active_small + reflections_active + reflections_refreshing, 1)"
       threshold: "1"
       activationThreshold: "0"
 ```
@@ -404,7 +408,7 @@ Key ScaledObject parameters:
 | `11-configmap-executor-large.yaml` | Large executor config (node-tag: large, logback.xml) |
 | `12-executor-small.yaml` | Small executor StatefulSet (replicas: 0, KEDA-controlled) |
 | `13-executor-large.yaml` | Large executor StatefulSet (replicas: 0, KEDA-controlled) |
-| `Dockerfile` | Coordinator/executor image build |
+| `Dockerfile` | Coordinator/executor image build; overlays 7 custom JARs including `dremio-services-accelerator` |
 | `build-and-push.sh` | Build and push script |
 | `deploy.sh` | Full deployment script |
 

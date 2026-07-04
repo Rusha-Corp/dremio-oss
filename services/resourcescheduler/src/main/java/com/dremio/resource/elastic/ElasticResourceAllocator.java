@@ -16,8 +16,10 @@
 package com.dremio.resource.elastic;
 
 import com.dremio.config.DremioConfig;
+import com.dremio.resource.exception.ResourceAllocationException;
 import com.dremio.resource.exception.ResourceUnavailableException;
 import com.dremio.resource.basic.BasicResourceAllocator;
+import com.dremio.resource.basic.BasicResourceConstants;
 import com.dremio.resource.common.ResourceSchedulingContext;
 import com.dremio.service.coordinator.ClusterCoordinator;
 import java.util.concurrent.TimeUnit;
@@ -83,7 +85,13 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
           schedulingDecisionInfoConsumer);
     }
 
-    ResourcePlatform resourcePlatform = resourcePlatformProvider.get();
+    ResourcePlatform resourcePlatform;
+    try {
+      resourcePlatform = resourcePlatformProvider.get();
+    } catch (IllegalStateException e) {
+      throw new ResourceAllocationException(
+          "Elastic scaling unavailable: " + e.getMessage(), e);
+    }
 
     if (resourcePlatform == NoOpResourcePlatform.INSTANCE) {
       throw new IllegalStateException(
@@ -97,8 +105,16 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
     String routingQueue = resourceSchedulingProperties.getRoutingQueue();
 
     // Step 1: Calculate required executors and tier
+    // Use exec.queue.threshold (QUEUE_THRESHOLD_SIZE) for tier classification so that
+    // the elastic tier matches the BasicResourceAllocator queue classification. Without
+    // this alignment, a query with cost between the elastic smallQueryThreshold (10M)
+    // and the queue threshold (30M) would be classified as LARGE by elastic but SMALL
+    // by the queue allocator, causing fragments to be routed to the wrong executor tier.
+    long queueThreshold =
+        queryContext.getOptions().getOption(BasicResourceConstants.QUEUE_THRESHOLD_SIZE);
     int requiredExecutors = calculator.calculateRequiredExecutors(planCost);
-    ElasticAdmissionCalculator.ExecutorTier tier = calculator.getTier(planCost, routingQueue);
+    ElasticAdmissionCalculator.ExecutorTier tier =
+        calculator.getTier(planCost, routingQueue, (double) queueThreshold);
     // Use tier-aware count so a running small executor does not satisfy a LARGE query's requirement
     int availableExecutors = resourcePlatform.getAvailableExecutors(tier);
     int scaleDelta = calculator.calculateScaleDelta(requiredExecutors, availableExecutors);
@@ -112,10 +128,16 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
           availableExecutors,
           scaleDelta);
 
+      // Arm the idle-reset guard before scaling. This prevents the idle-reset scheduler
+      // from clearing elastic_desired_* gauges during the executor cold-start window
+      // (typically 60-90s) when jobs_active=0 because the query is still waiting for
+      // executors to register.
+      resourcePlatform.armIdleGuard();
+
       // Step 2: Scale the executors for the appropriate tier
       boolean scaled = resourcePlatform.scaleExecutors(scaleDelta, tier);
       if (!scaled) {
-        throw new RuntimeException(
+        throw new ResourceAllocationException(
             "Elastic scaling failed: could not provision "
                 + scaleDelta
                 + " executors for query with cost "
@@ -123,13 +145,14 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
       }
 
       // Step 3: Wait for executors of the correct tier to become ready
-      boolean ready = false;
+      boolean ready;
       try {
         ready =
             resourcePlatform.waitForExecutors(
                 requiredExecutors, tier, scaleTimeoutMinutes, TimeUnit.MINUTES);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
+        ready = false;
       }
 
       if (!ready) {
@@ -143,6 +166,13 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
             "Elastic scaling complete: {} executors available",
             resourcePlatform.getAvailableExecutors());
       }
+    } else {
+      // Executors already available — refresh the desired-count gauge and arm the
+      // cold-start guard so that KEDA does not scale down mid-query. Without this,
+      // a prior idle-reset may have left elastic_desired_* at 0, causing KEDA to
+      // scale down once the guard trigger (jobs_active) also drops to 0.
+      resourcePlatform.armIdleGuard();
+      resourcePlatform.scaleExecutors(0, tier);
     }
 
     // Step 4: Delegate to BasicResourceAllocator

@@ -61,39 +61,4 @@ subjects:
     name: dremio-elastic
     namespace: dremio
 ---
-# Metrics exporter ServiceAccount and RBAC
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: dremio-metrics-exporter
-  namespace: dremio
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: dremio-metrics-exporter-role
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets"]
-    verbs: ["get", "list"]
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["pods"]
-    verbs: ["get", "list"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: dremio-metrics-exporter-binding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: dremio-metrics-exporter-role
-subjects:
-  - kind: ServiceAccount
-    name: dremio-metrics-exporter
-    namespace: dremio
----
 # GHCR secret will be created by deploy.sh

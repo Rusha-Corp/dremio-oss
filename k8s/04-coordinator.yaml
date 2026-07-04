@@ -1,46 +1,98 @@
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: dremio-coordinator-0
+  name: dremio-coordinator
   namespace: dremio
   labels:
     app: dremio
     role: coordinator
 spec:
-  containers:
-    - name: coordinator
-      image: ghcr.io/rusha-corp/dremio-oss:coordinator-26.0.5-elastic
-      ports:
-        - containerPort: 9047
-          name: web
-        - containerPort: 45678
-          name: rpc
-        - containerPort: 2181
-          name: zk
-        - containerPort: 32010
-          name: flight
-      volumeMounts:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dremio
+      role: coordinator
+  template:
+    metadata:
+      labels:
+        app: dremio
+        role: coordinator
+    spec:
+      hostname: dremio-coordinator-0
+      subdomain: dremio-coordinator
+      terminationGracePeriodSeconds: 1800
+      securityContext:
+        fsGroup: 0
+      serviceAccountName: dremio-elastic
+      imagePullSecrets:
+        - name: ghcr-secret
+      nodeSelector:
+        kubernetes.io/hostname: vmi1594378.contaboserver.net
+      initContainers:
+        - name: fix-data-perms
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /opt/dremio/data/security
+              chmod -R go-rwx /opt/dremio/data
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: dremio-data
+              mountPath: /opt/dremio/data
+      containers:
+        - name: coordinator
+          image: ghcr.io/rusha-corp/dremio-oss:2026.06.2
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          ports:
+            - containerPort: 9047
+              name: web
+            - containerPort: 45678
+              name: rpc
+            - containerPort: 2181
+              name: zk
+            - containerPort: 45679
+              name: liveness
+            - containerPort: 32010
+              name: flight
+          volumeMounts:
+            - name: dremio-config
+              mountPath: /opt/dremio/conf
+            - name: dremio-data
+              mountPath: /opt/dremio/data
+            - name: dremio-dist
+              mountPath: /opt/dremio/dist
+          env:
+            # Coordinator split: 2.5 GB heap (planner/metadata), 1 GB direct
+            # (coordinator doesn't run query operators; direct memory is minimal).
+            # Total JVM = 3.5 GB, leaving ~0.5 GB for OS within the 4 Gi limit.
+            - name: DREMIO_MAX_HEAP_MEMORY_SIZE_MB
+              value: "2560"
+            - name: DREMIO_MAX_DIRECT_MEMORY_SIZE_MB
+              value: "1024"
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+              ephemeral-storage: "5Gi"
+            limits:
+              memory: "4Gi"
+              cpu: "2"
+              ephemeral-storage: "10Gi"
+      volumes:
         - name: dremio-config
-          mountPath: /opt/dremio/conf
+          configMap:
+            name: dremio-config
         - name: dremio-data
-          mountPath: /opt/dremio/data
-      env:
-        - name: DREMIO_JAVA_OPTS
-          value: "-Xmx4g -Xms4g"
-      resources:
-        requests:
-          memory: "4Gi"
-          cpu: "2"
-        limits:
-          memory: "4Gi"
-          cpu: "2"
-  volumes:
-    - name: dremio-config
-      configMap:
-        name: dremio-config
-    - name: dremio-data
-      emptyDir: {}
-  serviceAccountName: dremio-elastic
-  imagePullSecrets:
-    - name: ghcr-secret
-  restartPolicy: Always
+          persistentVolumeClaim:
+            claimName: dremio-coordinator-data
+        - name: dremio-dist
+          persistentVolumeClaim:
+            claimName: dremio-dist

@@ -62,10 +62,13 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
 
   // Idle-reset: resets desiredSmall/desiredLarge to 0 when all activity metrics
   // (jobs.active, maestro.active) have been 0 for IDLE_RESET_THRESHOLD consecutive
-  // polls (60 s). This prevents stale elastic_desired_* metrics from keeping executors
+  // polls (5 min). This prevents stale elastic_desired_* metrics from keeping executors
   // running after a query completes or is cancelled, since ElasticResourceAllocator has
   // no query-completion hook to call scaleExecutors(-N).
-  private static final int IDLE_RESET_THRESHOLD = 6; // 6 × 10 s = 60 s
+  // The 5-minute window gives executors enough time to register during cold-start
+  // (typically 60–90s) even if jobs.active briefly drops to 0 between planning and
+  // execution. It also accommodates PVC provisioning delays on cloud platforms.
+  private static final int IDLE_RESET_THRESHOLD = 30; // 30 × 10 s = 300 s = 5 min
   private final AtomicInteger idlePollCount = new AtomicInteger(0);
   // Starts as false so the idle-reset cannot fire until a job is observed.
   // Set to false by armIdleGuard() / scaleDeployment() when a scale-up is requested.

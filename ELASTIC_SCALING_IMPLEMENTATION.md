@@ -8,7 +8,7 @@ This implementation adds elastic (auto-scaling) executor support to Dremio with 
 1. `elastic_desired_small` / `elastic_desired_large` — Prometheus gauges set by `ElasticResourceAllocator` when a query requires more executors
 2. `jobs_active` + `maestro_active` — activity gauges used by KEDA's guard trigger to protect executors from premature scale-down while work is running
 
-Scale-down is handled by a background idle-reset thread in `K8sPlatform` — it resets `elastic_desired_*` to 0 after 30 seconds of inactivity. No sidecar exporter is required.
+Scale-down is handled by a background idle-reset thread in `K8sPlatform` — it resets `elastic_desired_*` to 0 after 5 minutes of inactivity. No sidecar exporter is required.
 
 The feature is **disabled by default** and does not alter existing Dremio behavior when turned off.
 
@@ -28,18 +28,18 @@ Executors are tagged via `node-tag: "small"` or `node-tag: "large"` in their Con
 | Layer | Setting | Value | Purpose |
 |-------|---------|-------|---------|
 | K8sPlatform idle-reset | poll interval | 10s | Check `jobs.active` + `maestro.active` via Micrometer globalRegistry |
-| K8sPlatform idle-reset | threshold | 6 polls = 60s | Reset `elastic_desired_*` to 0 after idle; uses total metrics (`jobs.active` + `maestro.active`) |
+| K8sPlatform idle-reset | threshold | 30 polls = 300s (5 min) | Reset `elastic_desired_*` to 0 after idle; uses total metrics (`jobs.active` + `maestro.active`). The 5-minute window accommodates executor cold-start (60–90s), PVC provisioning delays, and brief metric drops between query planning and execution. |
 | KEDA ScaledObject | `cooldownPeriod` | 600s | Hold pods after INACTIVE signal |
 | KEDA HPA | `stabilizationWindowSeconds` (scale-down) | 300s | Smooth replica changes |
 | Executor pod | `terminationGracePeriodSeconds` | 1800s | Allow in-flight query completion |
 
 **Observed scale-down sequence from a fully loaded state:**
 1. Last query completes → `jobs.active=0`, `maestro.active=0`
-2. After 60s: idle-reset fires → `elastic_desired_small=0`, `elastic_desired_large=0`
+2. After 5 min: idle-reset fires → `elastic_desired_small=0`, `elastic_desired_large=0`
 3. KEDA guard trigger also drops to 0 → ScaledObject becomes INACTIVE
-4. After 600s cooldown: KEDA sets `spec.replicas=0`
+4. After 10-min cooldown: KEDA sets `spec.replicas=0`
 5. Pods enter `preStop` sleep (120s) then terminate
-6. Total query-complete-to-zero: ~12 minutes
+6. Total query-complete-to-zero: ~17 minutes
 
 ---
 
@@ -64,10 +64,12 @@ Executors are tagged via `node-tag: "small"` or `node-tag: "large"` in their Con
 │  │  - reads jobs.active, maestro.active from Micrometer           │  │
 │  │    globalRegistry (in-process, no HTTP)                       │  │
 │  │  - if both=0 and jobSeenSinceScaleUp=true:                    │  │
-│  │      idlePollCount++ → after 6 polls (60s): reset gauges to 0 │  │
+│  │      idlePollCount++ → after 30 polls (5min): reset gauges 0  │  │
 │  │  - if both=0 and jobSeenSinceScaleUp=false: skip countdown    │  │
 │  │    (cold-start guard: executors provisioning, not yet ready)   │  │
 │  │  - if either>0: jobSeenSinceScaleUp=true, reset countdown     │  │
+│  │  - when reset fires: desiredSmall=0, desiredLarge=0,           │  │
+│  │    jobSeenSinceScaleUp=false (re-arm for next cycle)           │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                                                                      │
 │  Liveness endpoint: :45679/metrics                                   │
@@ -261,19 +263,25 @@ else if jobSeenSinceScaleUp = false:  (cold-start guard)
 
 else:
     idlePollCount++
-    if idlePollCount >= 6:  (60s threshold)
+    if idlePollCount >= 30:  (5-minute threshold)
         desiredSmall = 0
         desiredLarge = 0
         jobSeenSinceScaleUp = false  // re-arm for next cycle
         idlePollCount = 0
-        log "Idle reset: resetting elastic_desired_* to 0"
+        log "Idle reset: all activity metrics=0 for 300s — resetting elastic_desired_* to 0"
 ```
 
 **Cold-start guard rationale:**
 
-When a query arrives from a cold state (0 executors), `waitForExecutors()` blocks for up to 5 minutes while executor pods start. During this window, `jobs_active=0` because no executors are registered yet. Without the guard, the idle-reset thread would fire after 30s, reset `elastic_desired_*` to 0, KEDA would scale back to 0, and the query would time out.
+When a query arrives from a cold state (0 executors), `waitForExecutors()` blocks for up to `scale_timeout_minutes` (default 20 minutes) while executor pods start. During this window, `jobs_active=0` because no executors are registered yet. Without the guard, the idle-reset thread would fire after 5 minutes, reset `elastic_desired_*` to 0, KEDA would scale back to 0, and the query would time out.
 
-The guard suppresses the countdown until the first `jobs_active > 0` poll confirms executors are working. After that, the countdown runs normally.
+The guard suppresses the countdown until the first `jobs_active > 0` poll confirms executors are working. After that, the 5-minute countdown runs normally.
+
+The 5-minute threshold (30 × 10s) was chosen to accommodate:
+- Executor JVM startup (20–60s)
+- PVC provisioning on cloud platforms (60–120s per volume)
+- ZooKeeper registration delays
+- Brief `jobs_active=0` drops between query planning and execution start
 
 **`getAvailableExecutors(tier)`:** Reads from ZooKeeper `ListenableSet`, filtering by `node_tag`.
 
@@ -417,7 +425,7 @@ Key ScaledObject parameters:
 
 | Service | Image | Tag |
 |---------|-------|-----|
-| Coordinator / Executor | `ghcr.io/rusha-corp/dremio-oss` | `2026.05.7` |
+| Coordinator / Executor | `ghcr.io/rusha-corp/dremio-oss` | `2026.07.2` |
 
 ---
 
@@ -487,7 +495,7 @@ Added to `services/resourcescheduler/pom.xml`:
 | DremioConfig constants | Complete |
 | dremio-reference.conf | Complete |
 | DACDaemonModule wiring | Complete |
-| Idle-reset thread | Complete (30s threshold, cold-start guard) |
+| Idle-reset thread | Complete (5-min threshold, cold-start guard) |
 | Unit tests | Complete |
 | K8s manifests | Complete (dual prometheus triggers, minReplicaCount: 0 both tiers) |
 | KEDA ScaledObjects | Complete (prometheus triggers, cooldownPeriod: 600s) |
@@ -500,17 +508,17 @@ Added to `services/resourcescheduler/pom.xml`:
 ### Scale-Up Latency
 
 - First query after idle period triggers scale-up → 60–90 seconds for executors to start and register
-- `waitForExecutors()` timeout (default 5min) provides fail-safe fallback
-- If no executors available after 5min, query fails with a clear error message
+- PVC provisioning on cloud platforms adds 60–120s per volume (Longhorn, EBS CSI, etc.)
+- `waitForExecutors()` timeout (configurable, default 20min in production) provides fail-safe fallback
+- If no executors available after timeout, query fails with `ResourceUnavailableException`
+
+### NodeMetricsWriter Errors (Non-Critical)
+
+The coordinator logs `java.io.IOException: Cannot create non-canonical path /opt/dremio/dist/node_history/metrics/*.csv` every ~60 seconds. This is a known Dremio issue where `PseudoDistributedFileSystem` rejects non-remote file paths. The errors are non-critical and do not affect functionality. No fix is available without modifying core Dremio code.
 
 ### `scaleDelta = 0` Behavior
 
-When executors are already available (`scaleDelta = 0`), `scaleExecutors()` is skipped entirely:
-- `elastic_desired_*` gauges are NOT updated
-- Cold-start guard is NOT armed
-- Query runs directly with existing executors
-
-If the idle-reset has already fired (`elastic_desired_*=0`) but executors are still alive within KEDA's cooldown window, this is safe: the guard trigger (`jobs_active > 0`) keeps KEDA from scaling down during the query. Idle-reset fires after query completion as a no-op (`0→0`), and KEDA scales to 0 via the guard trigger dropping to 0.
+When executors are already available (`scaleDelta = 0`), `scaleExecutors()` is still called but with delta=0. This refreshes the `elastic_desired_*` gauge to the current replica count and re-arms the cold-start guard. If the idle-reset has already fired (`elastic_desired_*=0`) but executors are still alive within KEDA's cooldown window, this refresh ensures KEDA sees the correct desired count and does not scale down mid-query.
 
 ### Plan Cost Reliability
 
@@ -519,6 +527,46 @@ Dremio's planner reports `planCost = 1.0` for most queries. The tier detection u
 ---
 
 ## Recent Changes
+
+### 2026-07-06: Fix Idle-Reset Deadlock (Executors Stuck After Query Completion)
+
+**Problem:** After a query completed, `elastic_desired_small` and `elastic_desired_large` gauges remained stuck at their scale-up values (e.g., 3) indefinitely. KEDA never scaled executors down because the gauges never reset to 0. This caused executors to run for hours after all queries completed.
+
+**Root cause:** A previous fix (v2026.07.1) added a `desiredSmall > 0 || desiredLarge > 0` guard to `checkAndResetIfIdle()` to prevent premature reset during executor cold-start. However, this guard created a deadlock: the reset could only clear `desiredSmall`/`desiredLarge` to 0, but the guard prevented the reset whenever they were > 0. Since the gauges are only set to 0 by the reset, they could never be cleared.
+
+**Fix:** Removed the `desiredSmall > 0 || desiredLarge > 0` guard and increased the idle-reset threshold from 6 polls (60s) to 30 polls (5 minutes). The longer threshold provides sufficient protection during cold-start without creating a deadlock:
+
+1. During cold-start: `jobSeenSinceScaleUp = false` → countdown suppressed (unchanged)
+2. After job seen but activity drops to 0: 5-minute countdown before reset (was 60s)
+3. The 5-minute window accommodates executor JVM startup (20–60s), PVC provisioning (60–120s), and brief metric drops between planning and execution
+
+**Verified behavior:** Idle-reset now fires correctly at `Idle reset: all activity metrics=0 for 300s — resetting elastic_desired_small=1 elastic_desired_large=0 to 0`. KEDA deactivates ScaledObjects and scales executors to 0 after the cooldown period.
+
+**Files changed:**
+- `services/resourcescheduler/src/main/java/com/dremio/resource/elastic/K8sPlatform.java` — removed `desiredSmall/desiredLarge > 0` guard, increased `IDLE_RESET_THRESHOLD` from 6 to 30
+- `services/resourcescheduler/src/test/java/com/dremio/resource/elastic/K8sPlatformTest.java` — updated threshold assertion, replaced deadlock test with test verifying reset fires after threshold
+
+### 2026-07-05: Replace HTTP Polling with Micrometer GlobalRegistry Access
+
+**Problem:** K8sPlatform was polling its own liveness endpoint (`localhost:45679/metrics`) via HTTP and parsing Prometheus text format to read `jobs_active` and `maestro_active` gauges. This was fragile (HTTP parsing, network overhead) and added unnecessary latency.
+
+**Fix:** Replaced HTTP polling with direct Micrometer `Metrics.globalRegistry.find(name).gauge().value()` access. Since `K8sPlatform` runs in the same JVM as the coordinator, all gauges are accessible in-process without network calls or text parsing.
+
+**Additional changes:**
+- Reverted 13 core Dremio files to base 26.0.5 (tier-specific metric infrastructure in ForemenWorkManager, MaestroServiceImpl, QueryTracker, Foreman, ReflectionManager, etc.)
+- KEDA guard triggers now use total metrics (`jobs_active + maestro_active + reflections_active + reflections_refreshing`) instead of non-existent tier-specific variants
+- Removed accelerator JAR from Docker overlay
+- Simplified DACDaemonModule wiring (lambda Provider instead of anonymous ResourcePlatform wrapper)
+
+**Files changed:**
+- `services/resourcescheduler/src/main/java/com/dremio/resource/elastic/K8sPlatform.java` — replaced `checkAndResetIfIdle()` HTTP polling with Micrometer `globalRegistry` access; removed `parsePrometheusGauge()`, `METRICS_PORT`
+- `services/resourcescheduler/src/test/java/com/dremio/resource/elastic/K8sPlatformTest.java` — replaced 8 Prometheus parser tests with 4 Micrometer registry tests
+- `services/resourcescheduler/src/test/java/com/dremio/resource/elastic/ElasticResourceAllocatorTest.java` — added `OptionManager` mock for `QUEUE_THRESHOLD_SIZE`
+- `k8s/06-keda-small.yaml` — guard query uses total metrics
+- `k8s/07-keda-large.yaml` — guard query uses total metrics
+- `k8s/Dockerfile` — removed accelerator JAR overlay
+- `k8s/build-and-push.sh` — removed accelerator JAR staging step
+- `dac/daemon/src/main/java/com/dremio/dac/daemon/DACDaemonModule.java` — simplified Provider wiring
 
 ### 2026-06-05: Replace Custom Metrics Exporter with Native Prometheus Triggers
 
@@ -535,7 +583,7 @@ Additional issues identified over development:
 1. `K8sPlatform` publishes `elastic_desired_*` Prometheus gauges directly (no exporter middleman)
 2. KEDA uses native `prometheus` triggers reading from the coordinator via Prometheus
 3. A dual-trigger design (primary sizing + guard for scale-down protection) replaces the exporter's drain logic
-4. Background idle-reset thread in `K8sPlatform` resets gauges to 0 after 30s of inactivity
+4. Background idle-reset thread in `K8sPlatform` resets gauges to 0 after 5 minutes of inactivity (threshold increased from 60s after deadlock fix in v2026.07.2)
 5. Cold-start guard (`jobSeenSinceScaleUp` flag) prevents the idle-reset from firing during executor startup
 
 **Files changed:**

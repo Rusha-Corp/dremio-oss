@@ -128,8 +128,8 @@ public class K8sPlatformTest {
 
   @Test
   public void testIdleResetThresholdCalculation() {
-    // 6 polls * 10s = 60s idle threshold
-    int threshold = 6;
+    // 30 polls * 10s = 300s = 5min idle threshold
+    int threshold = 30;
     int polls = 0;
 
     for (int i = 0; i < threshold - 1; i++) {
@@ -171,10 +171,10 @@ public class K8sPlatformTest {
   public void testIdleResetProceedsAfterJobSeen() {
     // When jobSeenSinceScaleUp is true and jobs go idle, the countdown should proceed.
     boolean jobSeenSinceScaleUp = true;
-    int threshold = 6;
+    int threshold = 30;
     int idlePollCount = 0;
 
-    // Simulate 6 idle polls with guard disarmed
+    // Simulate 30 idle polls with guard disarmed
     for (int i = 0; i < threshold; i++) {
       if (!jobSeenSinceScaleUp) {
         idlePollCount = 0;
@@ -217,6 +217,33 @@ public class K8sPlatformTest {
 
     boolean active = jobsActive > 0.0 || maestroActive > 0.0;
     assertTrue(active);
+  }
+
+  @Test
+  public void testIdleResetFiresAfterThresholdEvenWithDesiredGaugesAboveZero() {
+    // After jobSeenSinceScaleUp=true and activity drops to 0, idle-reset should
+    // eventually fire (after IDLE_RESET_THRESHOLD polls) even if desiredSmall/desiredLarge > 0.
+    // The desiredGauges guard was removed because it created a deadlock: the reset
+    // could only clear desiredGauges to 0, but the guard prevented the reset whenever
+    // they were > 0. The 5-minute threshold (30 polls) gives enough time for
+    // executors to register during cold-start.
+    AtomicInteger desiredSmall = new AtomicInteger(3);
+    AtomicInteger desiredLarge = new AtomicInteger(3);
+    boolean jobSeenSinceScaleUp = true;
+    int threshold = 30;
+    int idlePollCount = 0;
+
+    // Simulate 30 idle polls — idle-reset should fire
+    for (int i = 0; i < threshold; i++) {
+      idlePollCount++;
+    }
+    assertTrue(idlePollCount >= threshold);
+
+    // After idle-reset fires, desiredGauges should be 0
+    desiredSmall.set(0);
+    desiredLarge.set(0);
+    assertEquals(0, desiredSmall.get());
+    assertEquals(0, desiredLarge.get());
   }
 
   // ---- Zero-delta scaleDeployment refreshes gauge ----

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="${GHCR_REPO:-ghcr.io/rusha-corp/dremio-oss}"
-export DREMIO_VERSION="2026.06.2"
+export DREMIO_VERSION="2026.07.2"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARBALL_GLOB="$REPO_ROOT/distribution/server/target/dremio-community-*.tar.gz"

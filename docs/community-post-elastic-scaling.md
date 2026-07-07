@@ -14,9 +14,9 @@
 
 ## What this does
 
-Elastic executor auto-scaling enables a Dremio coordinator to dynamically provision Kubernetes executor pods when queries require more compute. The coordinator signals desired replica counts via Kubernetes annotations; **KEDA is the sole authority** on StatefulSet `spec.replicas`. This eliminates the race condition where coordinator and KEDA fight over the replica count.
+Elastic executor auto-scaling enables a Dremio coordinator to dynamically provision Kubernetes executor pods when queries require more compute. The coordinator publishes desired replica counts as Prometheus gauges; **KEDA is the sole authority** on StatefulSet `spec.replicas`, reading those gauges via native `prometheus` triggers.
 
-**Implemented and verified in production (May 2026).** Two tiers: SMALL (interactive) and LARGE (analytics/ETL).
+**Implemented and verified in production (July 2026).** Two tiers: SMALL (interactive) and LARGE (analytics/ETL).
 
 ---
 
@@ -40,39 +40,49 @@ Dremio Cloud offers engine-based compute pools with autoscaling managed by the c
 | Tier selection | SQL routing rules, pre-planning | `routingQueue` contains "large" → LARGE; else plan cost fallback |
 | Scaling unit | Engine replica (multi-node group) | Individual executor pod |
 | Scale-up | Async; query queues | Synchronous; query blocks in `waitForExecutors()` |
-| Scale-down | Control plane | KEDA + metrics-exporter (30min grace window) |
+| Scale-down | Control plane | KEDA + idle-reset thread (5-min threshold) |
 | Admin surface | Full UI + REST API | `dremio.conf` only |
 
 ---
 
-## Design: KEDA is the Sole Authority
+## Design: Coordinator-Published Gauges + KEDA
 
-### Three-Layer Architecture
+### Architecture
 
 ```
-Layer 1 — Coordinator (annotates intent)
+Layer 1 — Coordinator (publishes intent as Prometheus gauges)
   ElasticResourceAllocator: determine tier → calculate scaleDelta
-  K8sPlatform.scaleExecutors(delta, tier): writes annotations ONLY
-    - dremio.io/scale-requested-at = <epoch-ms>
-    - dremio.io/scale-requested-count = <newReplicas>
-  NEVER writes spec.replicas — only signals via annotations.
+  K8sPlatform.scaleExecutors(delta, tier):
+    - Sets elastic_desired_small/large AtomicInteger gauges
+    - Published via Micrometer globalRegistry → :45679/metrics
+    - Arms cold-start guard (jobSeenSinceScaleUp = false)
+  NEVER writes spec.replicas — only publishes metrics.
 
-Layer 2 — Exporter + KEDA (acts on intent)
-  Exporter polls: annotations + ZK endpoints + job history
-  Computes executor_desired_small/large from 3 signals (30min grace each)
-  KEDA reads metrics → sets spec.replicas on each poll cycle (every 10s)
+  K8sPlatform.checkAndResetIfIdle() (background thread, every 10s):
+    - Reads jobs.active, maestro.active from Micrometer globalRegistry
+    - After 30 idle polls (5 min): resets gauges to 0
+    - Cold-start guard: suppresses countdown while jobSeenSinceScaleUp=false
 
-Layer 3 — Cluster Autoscaler (node-level)
+Layer 2 — KEDA (acts on intent via Prometheus triggers)
+  Primary trigger: elastic_desired_small/large → drives replica count
+  Guard trigger: jobs_active + maestro_active → keeps executors alive during work
+  KEDA reads metrics every 10s → sets spec.replicas
+
+Layer 3 — Cluster Autoscaler (node-level, optional)
   Transparent provisioning when K8s can't schedule pods
 ```
 
 ### Why This Design
 
-1. **Avoids race condition**: Coordinator writes annotations; KEDA reads metrics and sets spec.replicas. No dual-write conflict.
+1. **No sidecar exporter**: The coordinator publishes gauges directly via Micrometer (in-process, no HTTP polling). No external metrics exporter is needed.
 
-2. **Synchronous contract**: The `allocate()` contract is synchronous — it must not return until resources are assigned or denied. Writing annotations and polling ZK (via `waitForExecutors()`) starts pod creation immediately while honoring this contract.
+2. **No dual-write conflict**: Coordinator publishes gauges; KEDA reads metrics and sets `spec.replicas`. The coordinator never writes `spec.replicas` directly.
 
-3. **Clean failure handling**: If executors don't become available within timeout (5 min), throws `ResourceUnavailableException`. Query is cancelled cleanly, not degraded to wrong tier.
+3. **Synchronous contract**: The `allocate()` contract is synchronous — it must not return until resources are assigned or denied. `waitForExecutors()` polls ZooKeeper every 2s until executors register or timeout.
+
+4. **Clean failure handling**: If executors don't become available within timeout (default 20 min), throws `ResourceUnavailableException`. Query is cancelled cleanly, not degraded to wrong tier.
+
+5. **Idle-reset prevents stale gauges**: A background thread resets `elastic_desired_*` to 0 after 5 minutes of inactivity, ensuring KEDA scales down even if the coordinator doesn't explicitly set gauges to 0 (e.g., after query completion or cancellation).
 
 ---
 
@@ -114,31 +124,43 @@ ElasticAdmissionCalculator.getTier(planCost, routingQueue)
                     ▼
             K8sPlatform.scaleExecutors(3, LARGE)
                     │
-                    ├─► Write: dremio.io/scale-requested-at = <now>
-                    ├─► Write: dremio.io/scale-requested-count = 3
-                    └─► Return (NO spec.replicas write!)
+                    ├─► desiredLarge.set(3)  → Micrometer gauge elastic_desired_large=3
+                    ├─► jobSeenSinceScaleUp = false  (arm cold-start guard)
+                    └─► Return true
                     │
                     ▼
-            waitForExecutors(3, LARGE, 5min)
+            waitForExecutors(3, LARGE, 20min)
                     │
                     └─► Poll ZooKeeper endpoints filtered by nodeTag=large
                        until count >= 3 or timeout
                     │
                     ▼
-            Query executes on LARGE executors
+            checkAndResetIfIdle() sees jobs_active>0 → jobSeenSinceScaleUp=true
+                    │
+                    ▼
+            BasicResourceAllocator.allocate() → query executes
 ```
 
-### 3. Scale-Down Flow (30-minute grace window)
+### 3. Scale-Down Flow
 
-Three independent signals, each with 1800s grace:
+```
+Last query completes → jobs_active=0, maestro_active=0
+    │
+    ▼ (5 minutes of inactivity)
+checkAndResetIfIdle() fires:
+    desiredSmall = 0, desiredLarge = 0
+    jobSeenSinceScaleUp = false (re-arm for next cycle)
+    │
+    ▼
+KEDA reads elastic_desired_* = 0
+KEDA guard trigger also = 0 → ScaledObject becomes INACTIVE
+    │
+    ▼ (10-minute cooldown period)
+KEDA sets spec.replicas = 0
+Pods terminate gracefully (preStop sleep 120s + terminationGracePeriodSeconds 1800s)
+```
 
-| Signal | Source | Behavior |
-|--------|--------|----------|
-| Job history | `/apiv2/jobs` | endTime within 1800s → reset timer |
-| Ready-pod window | K8s StatefulSet | readyReplicas > 0 within 1800s → reset timer |
-| Annotation | K8s StatefulSet | scale-requested-at within 1800s → reset timer |
-
-When **all** signals expire: exporter returns `desired = 0`, KEDA sets `spec.replicas = 0`, HPA stabilization window (1800s) provides final buffer.
+**Total query-complete-to-zero: ~17 minutes** (5 min idle-reset + 10 min KEDA cooldown + 2 min preStop)
 
 ---
 
@@ -151,46 +173,28 @@ When **all** signals expire: exporter returns `desired = 0`, KEDA sets `spec.rep
 
 ### ElasticResourceAllocator
 
-- `allocate()`: determines tier, checks ZK-available executors, writes annotations, waits for ZK registration, delegates to BasicResourceAllocator
+- `allocate()`: determines tier, checks ZK-available executors, publishes gauges, waits for ZK registration, delegates to BasicResourceAllocator
 - On timeout: throws `ResourceUnavailableException` (query cancelled cleanly)
 
 ### K8sPlatform
 
-- **Never writes spec.replicas** — only annotations
-- **Never reads K8s readyReplicas** — reads ZooKeeper endpoints filtered by nodeTag
-- Avoids K8s/ZK registration race where pod is K8s-ready but not yet ZK-registered
-
-### ResourcePlatform interface
-
-```java
-public interface ResourcePlatform extends AutoCloseable {
-    int getAvailableExecutors();
-    int getAvailableExecutors(ExecutorTier tier);  // ZK nodeTag filter
-    boolean waitForExecutors(int required, long timeout, TimeUnit unit);
-    boolean waitForExecutors(int required, ExecutorTier tier, long timeout, TimeUnit unit);
-    boolean scaleExecutors(int delta);
-    boolean scaleExecutors(int delta, ExecutorTier tier);  // annotation-only
-}
-```
+- **Never writes spec.replicas** — only publishes `elastic_desired_small/large` gauges
+- **Never reads K8s readyReplicas** — reads ZooKeeper endpoints filtered by `nodeTag`
+- **Idle-reset thread**: every 10s, checks `jobs.active` + `maestro.active` from Micrometer globalRegistry
+- **Cold-start guard**: `jobSeenSinceScaleUp` volatile boolean suppresses idle countdown during executor startup
 
 ### ExecutorSelectionServiceImpl
 
 - Routes queries to executors matching `nodeTag` ("small" or "large")
-- If no tagged executors found: **falls back** to all available endpoints with a warning
-- Does NOT throw RuntimeException
+- LARGE queue with no available executors: **fails fast** with clear error message
+- SMALL queue with no available executors: **falls back** to all available endpoints
 
-### Metrics Exporter
+### No Metrics Exporter Needed
 
-Python Flask service that:
-1. Polls `/apiv2/jobs` every 15s for recent jobs
-2. Reads StatefulSet annotations (`scale-requested-at`, `scale-requested-count`)
-3. Tracks `readyReplicas` timestamps per tier
-4. Computes `executor_desired_small` and `executor_desired_large`
-
-Three-signal grace logic (1800s each):
-- Signal 1: job history (endTime within grace)
-- Signal 2: ready-pod window (readyReplicas > 0 within grace)
-- Signal 3: annotation (scale-requested-at within grace) — also carries desired count
+The previous architecture used a Python Flask sidecar (`dremio-keda-exporter`) that polled the Dremio REST API. This has been removed. The coordinator now publishes gauges directly via Micrometer, and KEDA reads them via native `prometheus` triggers. This eliminates:
+- The circular dependency where the exporter couldn't see PENDING jobs (no executors → no running jobs → exporter reports 0 → KEDA stays at 0)
+- OOM kills from paginating 830k+ historical jobs
+- Excessive coordinator load from SQL-based job counting
 
 ---
 
@@ -200,46 +204,48 @@ Three-signal grace logic (1800s each):
 services.executor.elastic {
   enabled: true
   min_executors: 0
-  max_executors: 2        // SMALL tier
-  max_executors_large: 8  // LARGE tier
-  scale_timeout_minutes: 5
+  max_executors: 4               # small-tier cap
+  max_executors_large: 3         # large-tier cap (must match KEDA maxReplicaCount)
+  scale_timeout_minutes: 20       # max wait for executors to register
+
   kubernetes {
     namespace: "dremio"
     pod_template: "dremio-executor-small"
     pod_template_large: "dremio-executor-large"
   }
-  small_query_threshold: 10000000
-  medium_query_threshold: 30000000
+
+  small_query_threshold: 10000000    # plan cost ≤ 10M → 1 executor (SMALL)
+  medium_query_threshold: 30000000   # plan cost > 30M → 3 executors (LARGE)
 }
 ```
 
-Exporter env vars:
-- `SCALE_DOWN_GRACE_SECS`: 1800 (matches KEDA cooldown)
-- `DREMIO_URL`: coordinator service
-- `DREMIO_USERNAME` / `DREMIO_PASSWORD`: for REST API
+No exporter configuration is needed. The coordinator's idle-reset thread is built into `K8sPlatform` and requires no external deployment.
 
 ---
 
-## Verified Behavior (May 2026)
+## Scale-Down Timing
 
-### Scale-Up Timeline
-1. Query submitted with LARGE queue
-2. Coordinator writes annotations: `scale-requested-at`, `scale-requested-count=3`
-3. Exporter picks up annotation → `desired_large = 3`
-4. KEDA polls every 10s → sets `spec.replicas = 3`
-5. Pods start, register with ZooKeeper with `nodeTag=large`
-6. `waitForExecutors()` returns true → query runs
-7. Query completes successfully (state: COMPLETED)
+| Layer | Setting | Value | Purpose |
+|-------|---------|-------|---------|
+| K8sPlatform idle-reset | poll interval | 10s | Check `jobs.active` + `maestro.active` via Micrometer globalRegistry |
+| K8sPlatform idle-reset | threshold | 30 polls = 300s (5 min) | Reset `elastic_desired_*` to 0 after inactivity |
+| KEDA ScaledObject | `cooldownPeriod` | 600s | Hold pods after INACTIVE signal |
+| KEDA HPA | `stabilizationWindowSeconds` (scale-down) | 300s | Smooth replica changes |
+| Executor pod | `terminationGracePeriodSeconds` | 1800s | Allow in-flight query completion |
 
-### Scale-Down Timeline
-1. Query completes, no activity for 30+ minutes
-2. Signal 3 (annotation) expires first
-3. Signal 2 (ready-pod window) takes over for ~30 min
-4. Both expire → exporter logs "scaling to 0"
-5. KEDA cooldown (30 min) + HPA stabilization (30 min)
-6. Pods terminate cleanly via preStop hook
+---
 
-**Total cold-start-to-zero**: ~45-60 minutes depending on signal timing
+## Known Issues
+
+### Executors Stuck After Query Completion (Fixed in v2026.07.2)
+
+An earlier version (v2026.07.1) added a guard condition `desiredSmall > 0 || desiredLarge > 0` to the idle-reset logic, intending to prevent premature reset during executor cold-start. This created a deadlock: the reset could only clear the gauges to 0, but the guard prevented the reset whenever they were > 0. As a result, `elastic_desired_small` and `elastic_desired_large` remained stuck at their scale-up values indefinitely, keeping executors running hours after all queries completed.
+
+**Fix (v2026.07.2):** Removed the `desiredSmall/desiredLarge > 0` guard. The `jobSeenSinceScaleUp` flag alone provides sufficient cold-start protection. Increased the idle-reset threshold from 60s to 5 minutes to accommodate executor registration and PVC provisioning delays.
+
+### NodeMetricsWriter Errors (Non-Critical)
+
+The coordinator logs `java.io.IOException: Cannot create non-canonical path /opt/dremio/dist/node_history/metrics/*.csv` every ~60 seconds. This is a known Dremio issue where `PseudoDistributedFileSystem` rejects non-remote file paths. The errors are non-critical and do not affect functionality.
 
 ---
 
@@ -247,31 +253,9 @@ Exporter env vars:
 
 | Service | Image | Tag |
 |---------|-------|-----|
-| Coordinator/Executor | `ghcr.io/rusha-corp/dremio-oss` | `2026.05.7` |
-| Metrics Exporter | `ghcr.io/rusha-corp/dremio-keda-exporter` | `2026.05.6` |
+| Coordinator/Executor | `ghcr.io/rusha-corp/dremio-oss` | `2026.07.2` |
 
----
-
-## Files Changed
-
-```
-services/resourcescheduler/src/main/java/com/dremio/resource/elastic/
-  ElasticAdmissionCalculator.java
-  ElasticResourceAllocator.java
-  ResourcePlatform.java (interface, AutoCloseable)
-  K8sPlatform.java (annotation-only, ZK-based wait)
-  NoOpResourcePlatform.java
-  ResourcePlatformProvider.java
-
-services/execselector/src/main/java/com/dremio/service/execselector/
-  ExecutorSelectionServiceImpl.java (fallback, no RuntimeException)
-
-docs/elastic-scaling-deployment.md
-k8s/10-keda-scaledobject.yaml
-k8s/04-coordinator.yaml
-k8s/11a-executor-small-stub.yaml
-k8s/11b-executor-large-stub.yaml
-```
+No metrics exporter sidecar is required.
 
 ---
 
@@ -283,4 +267,4 @@ k8s/11b-executor-large-stub.yaml
 
 ---
 
-**Verified in production on 3-node k3s cluster (May 2026).**
+**Verified in production on multi-node k3s cluster (July 2026).**

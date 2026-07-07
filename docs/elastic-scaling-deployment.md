@@ -12,13 +12,24 @@ This guide walks through deploying Dremio OSS with KEDA-driven elastic executor 
 │  ElasticResourceAllocator                     │
 │  - query arrives → determine tier & delta     │
 │  - publishes elastic_desired_small/large      │
-│    as Prometheus gauges on :45679/metrics     │
+│    as Prometheus gauges via Micrometer         │
+│    globalRegistry (in-process, no HTTP)       │
 │                                               │
 │  K8sPlatform idle-reset thread (10s poll)    │
-│  - after 30s idle: resets gauges to 0         │
-│  - cold-start guard: suppressed during        │
-│    executor startup window (~60-90s)          │
-└───────────────────┬──────────────────────────┘
+│  - reads jobs.active, maestro.active from     │
+│    Micrometer globalRegistry (in-process)    │
+│  - after 5 min idle: resets gauges to 0       │
+│  - cold-start guard: suppressed while         │
+│    jobSeenSinceScaleUp=false (executor        │
+│    startup window ~60-90s)                   │
+│  - when reset fires: desiredSmall=0,           │
+│    desiredLarge=0, jobSeenSinceScaleUp=false │
+│                                               │
+│  Liveness endpoint: :45679/metrics           │
+│  - elastic_desired_small  (AtomicInteger)    │
+│  - elastic_desired_large  (AtomicInteger)    │
+│  - jobs.active, maestro.active               │
+└──────────────────┬──────────────────────────┘
                     │ Prometheus scrape (5s)
                     ▼
          ┌──────────────────────┐
@@ -37,15 +48,15 @@ This guide walks through deploying Dremio OSS with KEDA-driven elastic executor 
          └──────────────────────┘
 ```
 
-**Scale-up path:** Query arrives → coordinator computes required executors → publishes `elastic_desired_large=3` on liveness metrics → Prometheus scrapes it within 5s → KEDA reads it within 10s → sets `spec.replicas=3` → pods start and register → query executes.
+**Scale-up path:** Query arrives → coordinator computes required executors → publishes `elastic_desired_large=3` via Micrometer gauge → Prometheus scrapes it within 5s → KEDA reads it within 10s → sets `spec.replicas=3` → pods start and register → query executes.
 
-**Scale-down path:** `jobs_active=0` and `maestro_active=0` for 30s → coordinator resets `elastic_desired_*` to 0 → KEDA becomes INACTIVE → after `cooldownPeriod` (600s) → scales to zero.
+**Scale-down path:** `jobs_active=0` and `maestro_active=0` for 5 minutes → coordinator resets `elastic_desired_*` to 0 → KEDA becomes INACTIVE → after `cooldownPeriod` (600s) → scales to zero.
 
-**Cold-start guard:** When `scaleDeployment()` sets `newReplicas > 0`, the idle countdown is suppressed until the first job is seen running (`jobs_active > 0`). This prevents the 30s idle-reset from firing during the executor startup window, which would cancel the scale-up before executors become ready.
+**Cold-start guard:** When `scaleDeployment()` sets `newReplicas > 0`, the `jobSeenSinceScaleUp` flag is set to `false`, suppressing the idle countdown until the first job is seen running (`jobs_active > 0`). This prevents the 5-minute idle-reset from firing during the executor startup window, which would cancel the scale-up before executors become ready.
 
 Each KEDA ScaledObject has two `prometheus` triggers — KEDA takes the maximum:
 - **Primary**: `elastic_desired_small/large` — drives the desired replica count
-- **Guard**: `jobs_active + maestro_active (+ reflections_active for small)` — keeps executors alive while work is running
+- **Guard**: `jobs_active + maestro_active + reflections_active + reflections_refreshing` — keeps executors alive while work is running
 
 ---
 
@@ -65,7 +76,7 @@ Each KEDA ScaledObject has two `prometheus` triggers — KEDA takes the maximum:
 
 | Image | Registry | Notes |
 |---|---|---|
-| Dremio OSS (coordinator + executor) | `ghcr.io/rusha-corp/dremio-oss:2026.05.7` | Same binary; role set by ConfigMap |
+| Dremio OSS (coordinator + executor) | `ghcr.io/rusha-corp/dremio-oss:2026.07.2` | Same binary; role set by ConfigMap |
 
 ---
 
@@ -131,7 +142,7 @@ Edit `k8s/03-configmap.yaml` — the key elastic scaling section:
 ```hocon
 services.executor.elastic {
   enabled: true
-  scale_timeout_minutes: 5       # max wait for executors to register
+  scale_timeout_minutes: 20      # max wait for executors to register
 
   max_executors: 4               # small-tier cap
   max_executors_large: 8         # large-tier cap
@@ -265,6 +276,7 @@ Each ScaledObject uses two `prometheus` triggers. Key parameters:
 The `prometheus` serverAddress must match your Prometheus service DNS:
 ```yaml
 triggers:
+  # Primary: coordinator's desired count drives replica count
   - type: prometheus
     metadata:
       serverAddress: http://prometheus.<namespace>.svc.cluster.local:9090
@@ -272,11 +284,12 @@ triggers:
       query: "elastic_desired_small"
       threshold: "1"
       activationThreshold: "0"
+  # Guard: keep at least 1 while any work is active
   - type: prometheus
     metadata:
       serverAddress: http://prometheus.<namespace>.svc.cluster.local:9090
       metricName: dremio_work_active_small
-      query: "clamp_min(jobs_active + maestro_active + reflections_active, 0)"
+      query: "clamp_max(jobs_active + maestro_active + reflections_active + reflections_refreshing, 1)"
       threshold: "1"
       activationThreshold: "0"
 ```
@@ -324,7 +337,7 @@ INFO Published elastic_desired_small=2 to Prometheus (KEDA will apply via KEDA)
 
 Expected coordinator log when idle-reset fires after query completes:
 ```
-INFO Idle reset: jobs_active=0 maestro_active=0 for 30s — resetting elastic_desired_small=2 elastic_desired_large=0 to 0
+INFO Idle reset: all activity metrics=0 for 300s — resetting elastic_desired_small=2 elastic_desired_large=0 to 0
 ```
 
 ---
@@ -360,12 +373,13 @@ INFO Idle reset: jobs_active=0 maestro_active=0 for 30s — resetting elastic_de
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Coordinator crashes: `properties were invalid: ...pod_template_large` | Config key missing from `dremio-reference.conf` | Ensure you're on image `2026.05.7`+ which includes the fix |
+| Coordinator crashes: `properties were invalid: ...pod_template_large` | Config key missing from `dremio-reference.conf` | Ensure you're on image `2026.07.2`+ which includes the fix |
 | `elastic_desired_*` missing from Prometheus | Gauges only appear after first scale event (lazy init) | Submit a test query; check coordinator logs for `elastic-idle-reset` thread |
 | KEDA ScaledObject `ACTIVE: False` even after query | Prometheus not scraping coordinator, or `serverAddress` wrong in ScaledObject | Verify scrape job; check Prometheus targets UI |
 | Executors not scaling up | `elastic_desired_*` not published or KEDA trigger misconfigured | Check `kubectl get scaledobject -n dremio`; verify Prometheus has the metric |
-| `elastic_desired_*` never resets to 0 after query | Idle-reset thread failing silently | Check coordinator logs for `elastic-idle-reset` errors; verify `:45679/metrics` is reachable locally |
-| Query fails from cold state with timeout | Cold-start guard missing — idle-reset fired during executor startup | Ensure coordinator image is `2026.05.7`+ |
+| `elastic_desired_*` never resets to 0 after query | Idle-reset deadlock — gauges stuck above 0 | Ensure coordinator image is `2026.07.2`+ (see known issue below). Check logs for `Idle reset` messages |
+| Query fails from cold state with timeout | Cold-start guard missing — idle-reset fired during executor startup | Ensure coordinator image is `2026.07.2`+ |
+| Executors stuck running after all queries complete | `elastic_desired_*` gauges never dropped to 0 — idle-reset deadlock | Ensure image is `2026.07.2`+. The v2026.07.1 release had a bug where `desiredSmall/desiredLarge > 0` blocked the idle-reset indefinitely |
 | Executor evicted for ephemeral storage | Storage limits too low | Set small: 15Gi/30Gi, large: 30Gi/60Gi for request/limit |
 | Executor evicted but disk appears empty | Log flood from Netty DEBUG hex dumps — check `logs usedBytes` in kubelet stats | Add `logback.xml` to executor ConfigMaps with `io.netty` at `WARN` |
 | Orphaned executor PVCs after scale-down | `persistentVolumeClaimRetentionPolicy.whenScaled` is `Retain` | Set to `Delete` in the executor StatefulSet spec |

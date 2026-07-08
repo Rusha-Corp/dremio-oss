@@ -16,11 +16,11 @@
 package com.dremio.resource.elastic;
 
 import com.dremio.config.DremioConfig;
-import com.dremio.resource.exception.ResourceAllocationException;
-import com.dremio.resource.exception.ResourceUnavailableException;
 import com.dremio.resource.basic.BasicResourceAllocator;
 import com.dremio.resource.basic.BasicResourceConstants;
 import com.dremio.resource.common.ResourceSchedulingContext;
+import com.dremio.resource.exception.ResourceAllocationException;
+import com.dremio.resource.exception.ResourceUnavailableException;
 import com.dremio.service.coordinator.ClusterCoordinator;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -89,8 +89,7 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
     try {
       resourcePlatform = resourcePlatformProvider.get();
     } catch (IllegalStateException e) {
-      throw new ResourceAllocationException(
-          "Elastic scaling unavailable: " + e.getMessage(), e);
+      throw new ResourceAllocationException("Elastic scaling unavailable: " + e.getMessage(), e);
     }
 
     if (resourcePlatform == NoOpResourcePlatform.INSTANCE) {

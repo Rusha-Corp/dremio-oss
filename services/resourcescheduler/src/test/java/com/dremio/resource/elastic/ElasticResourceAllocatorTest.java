@@ -84,11 +84,7 @@ public class ElasticResourceAllocatorTest {
             config);
 
     try {
-      allocator.allocate(
-          mockContext(),
-          propsWithCost(100.0),
-          null,
-          info -> {});
+      allocator.allocate(mockContext(), propsWithCost(100.0), null, info -> {});
       fail("Expected ResourceAllocationException");
     } catch (ResourceAllocationException e) {
       assertTrue(e.getMessage().contains("Elastic scaling unavailable"));
@@ -107,11 +103,7 @@ public class ElasticResourceAllocatorTest {
             config);
 
     try {
-      allocator.allocate(
-          mockContext(),
-          propsWithCost(100.0),
-          null,
-          info -> {});
+      allocator.allocate(mockContext(), propsWithCost(100.0), null, info -> {});
       fail("Expected IllegalStateException");
     } catch (IllegalStateException e) {
       assertTrue(e.getMessage().contains("no valid platform"));
@@ -139,11 +131,7 @@ public class ElasticResourceAllocatorTest {
             config);
 
     try {
-      allocator.allocate(
-          mockContext(),
-          propsWithCost(1_000_000),
-          null,
-          info -> {});
+      allocator.allocate(mockContext(), propsWithCost(1_000_000), null, info -> {});
       fail("Expected ResourceAllocationException");
     } catch (ResourceAllocationException e) {
       assertTrue(e.getMessage().contains("could not provision"));
@@ -176,11 +164,7 @@ public class ElasticResourceAllocatorTest {
             config);
 
     try {
-      allocator.allocate(
-          mockContext(),
-          propsWithCost(1_000_000),
-          null,
-          info -> {});
+      allocator.allocate(mockContext(), propsWithCost(1_000_000), null, info -> {});
       fail("Expected ResourceUnavailableException");
     } catch (ResourceUnavailableException e) {
       assertTrue(e.getMessage().contains("did not become available"));
@@ -222,11 +206,7 @@ public class ElasticResourceAllocatorTest {
     // which are mocks here. We expect a NullPointerException from the superclass,
     // which proves the elastic scaling path completed successfully.
     try {
-      allocator.allocate(
-          mockContext(),
-          propsWithCost(1_000_000),
-          null,
-          info -> {});
+      allocator.allocate(mockContext(), propsWithCost(1_000_000), null, info -> {});
       // If no exception, the allocation worked (unlikely with mocks but acceptable)
     } catch (NullPointerException e) {
       // Expected — BasicResourceAllocator needs real ClusterCoordinator
@@ -257,11 +237,7 @@ public class ElasticResourceAllocatorTest {
 
     // After elastic scaling (no scale needed), BasicResourceAllocator.allocate() is called.
     try {
-      allocator.allocate(
-          mockContext(),
-          propsWithCost(1_000_000),
-          null,
-          info -> {});
+      allocator.allocate(mockContext(), propsWithCost(1_000_000), null, info -> {});
     } catch (NullPointerException e) {
       // Expected — BasicResourceAllocator needs real ClusterCoordinator
     } catch (ResourceAllocationException e) {
@@ -291,8 +267,7 @@ public class ElasticResourceAllocatorTest {
   @Test
   public void testLargeQueueOverridesCost() {
     ElasticAdmissionCalculator calc = new ElasticAdmissionCalculator();
-    assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.LARGE, calc.getTier(100, "query.large"));
+    assertEquals(ElasticAdmissionCalculator.ExecutorTier.LARGE, calc.getTier(100, "query.large"));
   }
 
   @Test
@@ -309,8 +284,7 @@ public class ElasticResourceAllocatorTest {
     // With override threshold 30M, cost 20M is SMALL (20M <= 30M)
     // even though the constructor's smallQueryThreshold (10M) would classify it as LARGE
     assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.SMALL,
-        calc.getTier(20_000_000, null, 30_000_000));
+        ElasticAdmissionCalculator.ExecutorTier.SMALL, calc.getTier(20_000_000, null, 30_000_000));
   }
 
   @Test
@@ -318,8 +292,7 @@ public class ElasticResourceAllocatorTest {
     ElasticAdmissionCalculator calc = new ElasticAdmissionCalculator(10_000_000, 30_000_000);
     // With override threshold 30M, cost 35M is LARGE (35M > 30M)
     assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.LARGE,
-        calc.getTier(35_000_000, null, 30_000_000));
+        ElasticAdmissionCalculator.ExecutorTier.LARGE, calc.getTier(35_000_000, null, 30_000_000));
   }
 
   @Test
@@ -339,11 +312,9 @@ public class ElasticResourceAllocatorTest {
     // the queue allocator classifies the query as SMALL.
     ElasticAdmissionCalculator calc = new ElasticAdmissionCalculator(10_000_000, 30_000_000);
     assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.SMALL,
-        calc.getTier(15_000_000, null, 30_000_000));
+        ElasticAdmissionCalculator.ExecutorTier.SMALL, calc.getTier(15_000_000, null, 30_000_000));
     assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.LARGE,
-        calc.getTier(15_000_000, null, 10_000_000));
+        ElasticAdmissionCalculator.ExecutorTier.LARGE, calc.getTier(15_000_000, null, 10_000_000));
   }
 
   // ---- Scale delta calculation ----

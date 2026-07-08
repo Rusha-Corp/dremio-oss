@@ -283,9 +283,10 @@ public class K8sPlatformTest {
   public void testSmallTierSelectsSmallDeployment() {
     ElasticAdmissionCalculator calc = new ElasticAdmissionCalculator();
     ElasticAdmissionCalculator.ExecutorTier tier = calc.getTier(5_000_000);
-    String deploymentName = (tier == ElasticAdmissionCalculator.ExecutorTier.LARGE)
-        ? "dremio-executor-large"
-        : "dremio-executor-small";
+    String deploymentName =
+        (tier == ElasticAdmissionCalculator.ExecutorTier.LARGE)
+            ? "dremio-executor-large"
+            : "dremio-executor-small";
     assertEquals("dremio-executor-small", deploymentName);
   }
 
@@ -293,9 +294,10 @@ public class K8sPlatformTest {
   public void testLargeTierSelectsLargeDeployment() {
     ElasticAdmissionCalculator calc = new ElasticAdmissionCalculator();
     ElasticAdmissionCalculator.ExecutorTier tier = calc.getTier(50_000_000);
-    String deploymentName = (tier == ElasticAdmissionCalculator.ExecutorTier.LARGE)
-        ? "dremio-executor-large"
-        : "dremio-executor-small";
+    String deploymentName =
+        (tier == ElasticAdmissionCalculator.ExecutorTier.LARGE)
+            ? "dremio-executor-large"
+            : "dremio-executor-small";
     assertEquals("dremio-executor-large", deploymentName);
   }
 }

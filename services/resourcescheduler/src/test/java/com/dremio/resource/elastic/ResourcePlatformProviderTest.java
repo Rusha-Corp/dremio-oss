@@ -19,7 +19,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 import com.dremio.config.DremioConfig;
 import com.dremio.service.coordinator.ClusterCoordinator;
@@ -31,8 +30,7 @@ public class ResourcePlatformProviderTest {
 
   @Test
   public void testReturnsNoOpPlatformWhenElasticDisabled() {
-    DremioConfig config =
-        DremioConfig.create().withValue(DremioConfig.ELASTIC_ENABLED, false);
+    DremioConfig config = DremioConfig.create().withValue(DremioConfig.ELASTIC_ENABLED, false);
 
     Provider<ClusterCoordinator> ccProvider = mock(Provider.class);
 
@@ -45,8 +43,7 @@ public class ResourcePlatformProviderTest {
 
   @Test
   public void testCachesPlatformInstance() {
-    DremioConfig config =
-        DremioConfig.create().withValue(DremioConfig.ELASTIC_ENABLED, false);
+    DremioConfig config = DremioConfig.create().withValue(DremioConfig.ELASTIC_ENABLED, false);
 
     Provider<ClusterCoordinator> ccProvider = mock(Provider.class);
 
@@ -78,8 +75,7 @@ public class ResourcePlatformProviderTest {
 
   @Test
   public void testCloseOnNoOpPlatform() throws Exception {
-    DremioConfig config =
-        DremioConfig.create().withValue(DremioConfig.ELASTIC_ENABLED, false);
+    DremioConfig config = DremioConfig.create().withValue(DremioConfig.ELASTIC_ENABLED, false);
 
     Provider<ClusterCoordinator> ccProvider = mock(Provider.class);
 

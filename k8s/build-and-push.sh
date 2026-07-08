@@ -25,13 +25,12 @@ rm -f "$SCRIPT_DIR/dremio-distribution.tar.gz"
 cp "$TARBALL" "$SCRIPT_DIR/dremio-distribution.tar.gz"
 
 # 2b. Stage rebuilt JARs (replace stale copies in k8s/)
+# Only the two JARs that changed need restaging; the other four are already in k8s/.
 echo "=== Staging rebuilt JARs ==="
-cp "$REPO_ROOT/common/legacy/target/dremio-common-"*.jar "$SCRIPT_DIR/"
-cp "$REPO_ROOT/services/resourcescheduler/target/dremio-services-resourcescheduler-"*.jar "$SCRIPT_DIR/"
-cp "$REPO_ROOT/distribution/server/target/dremio-services-execselector-"*.jar "$SCRIPT_DIR/"
-cp "$REPO_ROOT/distribution/server/target/dremio-services-telemetry-api-"*.jar "$SCRIPT_DIR/"
-cp "$REPO_ROOT/distribution/server/target/dremio-sabot-kernel-"*.jar "$SCRIPT_DIR/"
-cp "$REPO_ROOT/distribution/server/target/dremio-dac-backend-"*.jar "$SCRIPT_DIR/"
+COMMON_JAR="$(find "$REPO_ROOT/common/legacy/target" -name 'dremio-common-*.jar' ! -name '*-tests.jar' | head -1)"
+RSCHED_JAR="$(find "$REPO_ROOT/services/resourcescheduler/target" -name 'dremio-services-resourcescheduler-*.jar' ! -name '*-tests.jar' | head -1)"
+[ -n "$COMMON_JAR" ] && cp "$COMMON_JAR" "$SCRIPT_DIR/"
+[ -n "$RSCHED_JAR" ] && cp "$RSCHED_JAR" "$SCRIPT_DIR/"
 
 # 3. Login to GHCR
 echo "=== Logging in to GHCR ==="
@@ -50,7 +49,4 @@ docker push "${REPO}:latest"
 
 # 5. Cleanup staged files
 rm "$SCRIPT_DIR/dremio-distribution.tar.gz"
-rm -f "$SCRIPT_DIR/dremio-common-"*.jar "$SCRIPT_DIR/dremio-services-resourcescheduler-"*.jar
-rm -f "$SCRIPT_DIR/dremio-services-execselector-"*.jar "$SCRIPT_DIR/dremio-services-telemetry-api-"*.jar
-rm -f "$SCRIPT_DIR/dremio-sabot-kernel-"*.jar "$SCRIPT_DIR/dremio-dac-backend-"*.jar
 echo "=== Done. Images pushed: ${REPO}:${DREMIO_VERSION}, ${REPO}:latest ==="

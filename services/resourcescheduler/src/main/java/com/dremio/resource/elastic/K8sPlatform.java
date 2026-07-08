@@ -113,14 +113,14 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
 
   /**
    * Checks if the coordinator is idle by reading activity gauges directly from the Micrometer
-   * globalRegistry. When all activity metrics (jobs.active, maestro.active) have been 0 for
-   * {@link #IDLE_RESET_THRESHOLD} consecutive polls, resets desiredSmall and desiredLarge to 0
-   * so that stale elastic_desired_* gauges do not keep executors running indefinitely after a
-   * query completes or is cancelled.
+   * globalRegistry. When all activity metrics (jobs.active, maestro.active) have been 0 for {@link
+   * #IDLE_RESET_THRESHOLD} consecutive polls, resets desiredSmall and desiredLarge to 0 so that
+   * stale elastic_desired_* gauges do not keep executors running indefinitely after a query
+   * completes or is cancelled.
    *
-   * <p>This replaces the previous HTTP polling approach. Since K8sPlatform runs in the same JVM
-   * as the coordinator, all gauges are accessible via {@code Metrics.globalRegistry} without
-   * network overhead or text parsing.
+   * <p>This replaces the previous HTTP polling approach. Since K8sPlatform runs in the same JVM as
+   * the coordinator, all gauges are accessible via {@code Metrics.globalRegistry} without network
+   * overhead or text parsing.
    */
   private void checkAndResetIfIdle() {
     try {
@@ -153,7 +153,9 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
             logger.info(
                 "Idle reset: all activity metrics=0 for {}s — "
                     + "resetting elastic_desired_small={} elastic_desired_large={} to 0",
-                IDLE_RESET_THRESHOLD * 10, prevSmall, prevLarge);
+                IDLE_RESET_THRESHOLD * 10,
+                prevSmall,
+                prevLarge);
           }
           jobSeenSinceScaleUp = false; // re-arm for the next scale-up cycle
           idlePollCount.set(0);

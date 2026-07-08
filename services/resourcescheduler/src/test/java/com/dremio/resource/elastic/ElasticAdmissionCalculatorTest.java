@@ -89,25 +89,19 @@ public class ElasticAdmissionCalculatorTest {
   public void testGetTierWithLargeQueueName() {
     // queue name overrides plan cost
     assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.LARGE,
-        calculator.getTier(1_000, "query.large"));
-    assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.LARGE, calculator.getTier(1_000, "LARGE"));
-    assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.LARGE, calculator.getTier(0, "WS.large"));
+        ElasticAdmissionCalculator.ExecutorTier.LARGE, calculator.getTier(1_000, "query.large"));
+    assertEquals(ElasticAdmissionCalculator.ExecutorTier.LARGE, calculator.getTier(1_000, "LARGE"));
+    assertEquals(ElasticAdmissionCalculator.ExecutorTier.LARGE, calculator.getTier(0, "WS.large"));
   }
 
   @Test
   public void testGetTierWithSmallOrNullQueue() {
     // falls back to cost-based when no "large" keyword
     assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.SMALL,
-        calculator.getTier(1_000, "query.small"));
+        ElasticAdmissionCalculator.ExecutorTier.SMALL, calculator.getTier(1_000, "query.small"));
+    assertEquals(ElasticAdmissionCalculator.ExecutorTier.SMALL, calculator.getTier(1_000, null));
     assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.SMALL, calculator.getTier(1_000, null));
-    assertEquals(
-        ElasticAdmissionCalculator.ExecutorTier.LARGE,
-        calculator.getTier(50_000_000, null));
+        ElasticAdmissionCalculator.ExecutorTier.LARGE, calculator.getTier(50_000_000, null));
   }
 
   // ---- 3-arg getTier with queue threshold override ----

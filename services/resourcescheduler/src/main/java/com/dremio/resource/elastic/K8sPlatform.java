@@ -192,11 +192,6 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   }
 
   @Override
-  public boolean scaleExecutors(int scaleDelta) {
-    return scaleDeployment(deploymentNameSmall, scaleDelta, maxExecutorsSmall);
-  }
-
-  @Override
   public boolean scaleExecutors(int scaleDelta, ElasticAdmissionCalculator.ExecutorTier tier) {
     String deploymentName =
         (tier == ElasticAdmissionCalculator.ExecutorTier.LARGE)

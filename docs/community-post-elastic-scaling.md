@@ -204,7 +204,7 @@ The previous architecture used a Python Flask sidecar (`dremio-keda-exporter`) t
 services.executor.elastic {
   enabled: true
   min_executors: 0
-  max_executors: 4               # small-tier cap
+  max_executors_small: 4         # small-tier cap
   max_executors_large: 3         # large-tier cap (must match KEDA maxReplicaCount)
   scale_timeout_minutes: 20       # max wait for executors to register
 

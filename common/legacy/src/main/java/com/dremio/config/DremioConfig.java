@@ -104,7 +104,8 @@ public class DremioConfig extends NestedConfig {
   // Elastic scaling configuration
   public static final String ELASTIC_ENABLED = "services.executor.elastic.enabled";
   public static final String ELASTIC_MIN_EXECUTORS = "services.executor.elastic.min_executors";
-  public static final String ELASTIC_MAX_EXECUTORS = "services.executor.elastic.max_executors";
+  public static final String ELASTIC_MAX_EXECUTORS_SMALL =
+      "services.executor.elastic.max_executors_small";
   public static final String ELASTIC_MAX_EXECUTORS_LARGE =
       "services.executor.elastic.max_executors_large";
   public static final String ELASTIC_SCALE_TIMEOUT =

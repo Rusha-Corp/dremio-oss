@@ -70,21 +70,25 @@ spec:
             - name: dremio-dist
               mountPath: /opt/dremio/dist
           env:
-            # Coordinator split: 2.5 GB heap (planner/metadata), 1 GB direct
-            # (coordinator doesn't run query operators; direct memory is minimal).
-            # Total JVM = 3.5 GB, leaving ~0.5 GB for OS within the 4 Gi limit.
+            # Coordinator split: 8 GB heap (planner/metadata), 4 GB direct
+            # (coordinator doesn't run query operators but needs direct memory for
+            # Fabric RPC, Arrow flight, and concurrent query planning buffers).
+            # Total JVM = 12 GB, leaving ~2 GB for OS within the 14 Gi limit.
             - name: DREMIO_MAX_HEAP_MEMORY_SIZE_MB
-              value: "2560"
+              value: "8192"
             - name: DREMIO_MAX_DIRECT_MEMORY_SIZE_MB
-              value: "1024"
+              value: "4096"
+            # G1GC tuning for 8 GB heap: larger regions, earlier marking, reserve
+            - name: DREMIO_GC_OPTS
+              value: "-XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:G1HeapRegionSize=8m -XX:InitiatingHeapOccupancyPercent=30 -XX:G1ReservePercent=15"
           resources:
             requests:
-              memory: "4Gi"
-              cpu: "2"
+              memory: "14Gi"
+              cpu: "4"
               ephemeral-storage: "5Gi"
             limits:
-              memory: "4Gi"
-              cpu: "2"
+              memory: "14Gi"
+              cpu: "8"
               ephemeral-storage: "10Gi"
       volumes:
         - name: dremio-config

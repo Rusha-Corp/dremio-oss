@@ -20,7 +20,7 @@ spec:
               value: 2
           stabilizationWindowSeconds: 0
   cooldownPeriod: 600
-  maxReplicaCount: 4
+  maxReplicaCount: 2
   minReplicaCount: 0
   pollingInterval: 10
   scaleTargetRef:

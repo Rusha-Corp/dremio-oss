@@ -323,7 +323,7 @@ services.executor.elastic {
   enabled: true
 
   min_executors: 0
-  max_executors: 4               # small-tier cap
+  max_executors_small: 4         # small-tier cap
   max_executors_large: 8         # large-tier cap
   scale_timeout_minutes: 5
 
@@ -344,7 +344,7 @@ services.executor.elastic {
 |----------|-----------|----------|
 | `ELASTIC_ENABLED` | `services.executor.elastic.enabled` | `false` |
 | `ELASTIC_MIN_EXECUTORS` | `services.executor.elastic.min_executors` | 0 |
-| `ELASTIC_MAX_EXECUTORS` | `services.executor.elastic.max_executors` | 10 |
+| `ELASTIC_MAX_EXECUTORS_SMALL` | `services.executor.elastic.max_executors_small` | 10 |
 | `ELASTIC_MAX_EXECUTORS_LARGE` | `services.executor.elastic.max_executors_large` | 8 |
 | `ELASTIC_SCALE_TIMEOUT` | `services.executor.elastic.scale_timeout_minutes` | 5 |
 | `ELASTIC_K8S_NAMESPACE` | `services.executor.elastic.kubernetes.namespace` | `dremio` |
@@ -389,7 +389,7 @@ Key ScaledObject parameters:
 | Parameter | Small | Large | Notes |
 |---|---|---|---|
 | `minReplicaCount` | 0 | 0 | Full scale-to-zero |
-| `maxReplicaCount` | 4 | 8 | Must match `max_executors` in `dremio.conf` |
+| `maxReplicaCount` | 4 | 8 | Must match `max_executors_small`/`max_executors_large` in `dremio.conf` |
 | `cooldownPeriod` | 600 | 600 | Seconds after INACTIVE before scaling to 0 |
 | `pollingInterval` | 10 | 10 | Seconds between metric reads |
 | `scaleUp.stabilizationWindowSeconds` | 0 | 0 | Scale up immediately |

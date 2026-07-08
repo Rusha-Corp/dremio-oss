@@ -15,7 +15,7 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 | Dremio OSS | `ghcr.io/rusha-corp/dremio-oss:2026.07.2` |
 | KEDA | v2.x operator installed on cluster |
 | Prometheus | Deployed in `rusha` namespace, scrapes coordinator every 5s |
-| Coordinator | 1 pod, 2.5 GB heap / 1 GB direct (on vmi1594378) |
+| Coordinator | 1 pod, 8 GB heap / 4 GB direct (on vmi1594378) |
 | Small executors | KEDA-managed StatefulSet, 4 vCPU / 15Gi (t3a.xlarge-equiv), anti-affinity, 30Gi spill PVC |
 | Large executors | KEDA-managed StatefulSet, 8 vCPU / 62Gi (i4i.2xlarge-equiv), anti-affinity, 100Gi spill PVC |
 
@@ -641,5 +641,5 @@ Cognito id_tokens expire after the configured TTL (default 8 hours per the dashb
 
 1. Add `nodeSelector` blocks to both executor StatefulSets
 2. Adjust `maxReplicaCount` in KEDA ScaledObjects to match ASG capacity
-3. Adjust `max_executors` / `max_executors_large` in coordinator configmap
+3. Adjust `max_executors_small` / `max_executors_large` in coordinator configmap
 4. No other changes needed — the anti-affinity is `preferredDuringSchedulingIgnoredDuringExecution` so it degrades gracefully when nodeSelectors restrict placement

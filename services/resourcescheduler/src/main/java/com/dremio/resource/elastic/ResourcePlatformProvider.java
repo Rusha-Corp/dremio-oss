@@ -117,7 +117,7 @@ public class ResourcePlatformProvider implements Provider<ResourcePlatform>, Clo
         deploymentNameLarge = deploymentNameSmall + "-large";
       }
 
-      int maxExecutorsSmall = config.getInt(DremioConfig.ELASTIC_MAX_EXECUTORS);
+      int maxExecutorsSmall = config.getInt(DremioConfig.ELASTIC_MAX_EXECUTORS_SMALL);
       int maxExecutorsLarge = config.getInt(DremioConfig.ELASTIC_MAX_EXECUTORS_LARGE);
 
       logger.info(

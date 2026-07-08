@@ -39,7 +39,7 @@ public final class NoOpResourcePlatform implements ResourcePlatform {
   }
 
   @Override
-  public boolean scaleExecutors(int scaleDelta) {
+  public boolean scaleExecutors(int scaleDelta, ElasticAdmissionCalculator.ExecutorTier tier) {
     return false;
   }
 }

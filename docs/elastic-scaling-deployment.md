@@ -144,7 +144,7 @@ services.executor.elastic {
   enabled: true
   scale_timeout_minutes: 20      # max wait for executors to register
 
-  max_executors: 4               # small-tier cap
+  max_executors_small: 4         # small-tier cap
   max_executors_large: 8         # large-tier cap
 
   kubernetes {

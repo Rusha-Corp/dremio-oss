@@ -8,6 +8,15 @@
 #
 # 3 nodes provide quorum tolerance for 1 node failure.
 # ZooKeeper 3.8.4 matches the version bundled with Dremio 26.0.5.
+#
+# Storage: Uses local-path (direct node disk) instead of Longhorn.
+# Longhorn's network replication causes 1-3 second fsync times on ZK's
+# transaction log, which triggers leader elections and executor
+# disconnections. local-path eliminates this overhead.
+#
+# Anti-affinity: ZK pods avoid nodes running the coordinator (weight 90)
+# and executors (weight 50) to prevent disk I/O contention from
+# query processing and spill operations.
 apiVersion: v1
 kind: Service
 metadata:
@@ -60,12 +69,29 @@ spec:
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
+            # Spread ZK pods across different nodes (highest priority)
             - weight: 100
               podAffinityTerm:
                 labelSelector:
                   matchLabels:
                     app: dremio
                     role: zookeeper
+                topologyKey: kubernetes.io/hostname
+            # Avoid the coordinator node (heavy I/O from planner + metadata)
+            - weight: 90
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: dremio
+                    role: coordinator
+                topologyKey: kubernetes.io/hostname
+            # Avoid executor nodes (heavy I/O from query processing + spill)
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: dremio
+                    role: executor
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: zookeeper
@@ -82,6 +108,21 @@ spec:
             # Whitelist 4-letter-word commands for readiness/liveness probes
             - name: ZOO_4LW_COMMANDS_WHITELIST
               value: "ruok,stat,mntr"
+            # Increase tickTime from default 2000ms to 3000ms to tolerate
+            # higher fsync latency on shared storage. This extends the
+            # session timeout window (tickTime * 2 * sessionTimeout ticks)
+            # giving executor Curator clients more time to recover from
+            # transient ZK disconnects before sessions expire.
+            - name: ZOO_TICK_TIME
+              value: "3000"
+            # Increase initLimit from 5 to 10 ticks (30s at 3000ms tickTime)
+            # so followers have more time to sync with leader during election.
+            - name: ZOO_INIT_LIMIT
+              value: "10"
+            # Increase syncLimit from 2 to 5 ticks (15s at 3000ms tickTime)
+            # so followers tolerate longer fsync delays before dropping leader.
+            - name: ZOO_SYNC_LIMIT
+              value: "5"
             # The official zookeeper image reads ZOO_MY_ID (1-indexed).
             # Extract ordinal from pod name and add 1.
             - name: ZOO_MY_ID
@@ -105,6 +146,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 6
+            timeoutSeconds: 5  # Was 1s; fsync delays can block ZK for 2-3s
           livenessProbe:
             tcpSocket:
               port: 2181
@@ -127,7 +169,11 @@ spec:
         name: zk-data
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: longhorn
+        # local-path writes directly to node disk (no network replication).
+        # Longhorn adds ~2x write amplification via network replication,
+        # which causes 1-3 second fsync times on ZK and triggers leader
+        # elections + executor disconnections.
+        storageClassName: local-path
         resources:
           requests:
             storage: 5Gi
@@ -135,7 +181,7 @@ spec:
         name: zk-logs
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: longhorn
+        storageClassName: local-path
         resources:
           requests:
             storage: 2Gi

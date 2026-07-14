@@ -530,6 +530,24 @@ Dremio's planner reports `planCost = 1.0` for most queries. The tier detection u
 
 ## Recent Changes
 
+### 2026-07-14: Fix ZK fsync Latency Causing Executor Disconnections
+
+**Problem:** After the initial fixes, queries continued to fail with `ExecutionSetupException: One or more nodes lost connectivity during query`. The root cause was ZooKeeper disk I/O latency.
+
+**Root cause:** ZK-2 (the leader) was co-located with the coordinator (14Gi RAM) and executor-large-0 (62Gi RAM) on the same node. Additionally, ZK used Longhorn storage, which adds network replication overhead (~2x write amplification). The combined I/O contention caused ZK fsync times of 1.2-3.4 seconds (normal is <10ms). These delays triggered ZK leader elections, which caused executor Curator clients to enter SUSPENDED state. When sessions expired, the coordinator saw executors as "no longer registered" and failed queries.
+
+**Fix:**
+
+1. Switched ZK storage from Longhorn to `local-path` (direct node disk, no network replication). This eliminated fsync latency entirely.
+2. Added `podAntiAffinity` to ZK StatefulSet: avoid coordinator nodes (weight 90) and executor nodes (weight 50) to prevent disk I/O contention.
+3. Increased ZK `tickTime` from 2000ms to 3000ms, `initLimit` from 5 to 10 ticks, `syncLimit` from 2 to 5 ticks for better latency tolerance.
+4. Increased readiness probe timeout from 1s to 5s (fsync delays can block ZK for 2-3s).
+
+**Verification:** Zero fsync warnings across all 3 ZK pods after the fix. ZK pods placed on 3 different nodes, none on the coordinator node. Zero `ExecutionSetupException` errors. Queries completing successfully.
+
+**Files changed:**
+- `k8s/09-zookeeper.yaml` — switched storage to local-path, added podAntiAffinity, added ZK tuning env vars, increased readiness probe timeout
+
 ### 2026-07-14: Fix Long-Running Query Failures (3 Critical Issues)
 
 **Problem:** Long-running queries (4+ hour dbt MERGE operations) were failing due to three interconnected issues in the KEDA/Prometheus/elastic scaling pipeline.

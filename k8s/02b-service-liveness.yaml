@@ -1,0 +1,30 @@
+# Service for coordinator liveness/metrics endpoint.
+# Used by Prometheus to scrape :45679/metrics for elastic scaling gauges
+# (elastic_desired_small, elastic_desired_large, jobs_active, maestro_active,
+#  reflections_active, reflections_refreshing).
+# Separate from the main coordinator Service so that the liveness port is
+# independently addressable.
+#
+# NOTE: This service already exists in the cluster with a ClusterIP.
+# If you need to recreate it as headless, delete the existing service first:
+#   kubectl delete svc dremio-coordinator-liveness -n dremio
+# Then apply this manifest.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dremio-coordinator-liveness
+  namespace: dremio
+  labels:
+    app: dremio
+    role: coordinator
+spec:
+  # ClusterIP is assigned by k8s; do not set clusterIP: None on an existing service.
+  # To make this headless, delete the service first and change to clusterIP: None.
+  publishNotReadyAddresses: true  # Scrape metrics even during pod startup
+  ports:
+    - port: 45679
+      targetPort: 45679
+      name: liveness
+  selector:
+    app: dremio
+    role: coordinator

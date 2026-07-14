@@ -43,4 +43,4 @@ data:
       executor.cache.enabled: true
       node-tag: "large"
     }
-    zookeeper: "dremio-coordinator.dremio.svc.cluster.local:2181"
+    zookeeper: "dremio-zk-0.dremio-zk.dremio.svc.cluster.local:2181,dremio-zk-1.dremio-zk.dremio.svc.cluster.local:2181,dremio-zk-2.dremio-zk.dremio.svc.cluster.local:2181"

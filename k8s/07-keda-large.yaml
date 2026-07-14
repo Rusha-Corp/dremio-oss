@@ -37,10 +37,8 @@ spec:
         threshold: "1"
         activationThreshold: "0"
     # Guard: keep at least 1 while ANY work is active (jobs, maestro, reflections).
-    # Uses total jobs_active + maestro_active (not tier-specific) because small-tier
-    # queries can fall back to large executors via ExecutorSelectionServiceImpl
-    # fallback routing. Uses total reflections_active + reflections_refreshing
-    # because the tier-specific reflection metrics are not yet deployed.
+    # Uses total metrics because small-tier queries can fall back to large
+    # executors via ExecutorSelectionServiceImpl fallback routing.
     - type: prometheus
       metadata:
         serverAddress: http://prometheus.dremio.svc.cluster.local:9090

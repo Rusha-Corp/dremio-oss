@@ -1,0 +1,141 @@
+# External ZooKeeper ensemble for Dremio.
+#
+# Decouples ZK from the coordinator so that coordinator restarts (rolling
+# updates) do not disrupt executor registrations. Executors connect to this
+# ensemble instead of the coordinator's embedded ZK. When the coordinator
+# restarts, it reconnects as a ZK client and immediately sees existing
+# executor registrations — no executor restart or re-registration needed.
+#
+# 3 nodes provide quorum tolerance for 1 node failure.
+# ZooKeeper 3.8.4 matches the version bundled with Dremio 26.0.5.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dremio-zk
+  namespace: dremio
+  labels:
+    app: dremio
+    role: zookeeper
+spec:
+  clusterIP: None  # Headless for stable DNS (dremio-zk-N.dremio-zk.dremio.svc)
+  publishNotReadyAddresses: true  # ZK needs peer DNS before quorum forms
+  ports:
+    - port: 2181
+      name: client
+    - port: 2888
+      name: peer
+    - port: 3888
+      name: election
+  selector:
+    app: dremio
+    role: zookeeper
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dremio-zk
+  namespace: dremio
+  labels:
+    app: dremio
+    role: zookeeper
+spec:
+  serviceName: dremio-zk
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: dremio
+      role: zookeeper
+  template:
+    metadata:
+      labels:
+        app: dremio
+        role: zookeeper
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 0
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: dremio
+                    role: zookeeper
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: zookeeper
+          image: zookeeper:3.8.4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 2181
+              name: client
+            - containerPort: 2888
+              name: peer
+            - containerPort: 3888
+              name: election
+          env:
+            # Whitelist 4-letter-word commands for readiness/liveness probes
+            - name: ZOO_4LW_COMMANDS_WHITELIST
+              value: "ruok,stat,mntr"
+            # The official zookeeper image reads ZOO_MY_ID (1-indexed).
+            # Extract ordinal from pod name and add 1.
+            - name: ZOO_MY_ID
+              value: "1"
+            - name: ZOO_SERVERS
+              value: >-
+                server.1=dremio-zk-0.dremio-zk.dremio.svc.cluster.local:2888:3888;2181
+                server.2=dremio-zk-1.dremio-zk.dremio.svc.cluster.local:2888:3888;2181
+                server.3=dremio-zk-2.dremio-zk.dremio.svc.cluster.local:2888:3888;2181
+          command:
+            - sh
+            - -c
+            - |
+              # Extract ordinal from hostname (dremio-zk-0 -> 0) and set ZOO_MY_ID (1-indexed)
+              ORDINAL=${HOSTNAME##*-}
+              export ZOO_MY_ID=$((ORDINAL + 1))
+              exec /docker-entrypoint.sh zkServer.sh start-foreground
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 2181
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          volumeMounts:
+            - name: zk-data
+              mountPath: /data
+            - name: zk-logs
+              mountPath: /datalog
+  volumeClaimTemplates:
+    - metadata:
+        name: zk-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 5Gi
+    - metadata:
+        name: zk-logs
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 2Gi

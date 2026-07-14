@@ -33,12 +33,17 @@ done
 
 echo "=== Applying services ==="
 kubectl apply -f "$SCRIPT_DIR/02-service.yaml"
+kubectl apply -f "$SCRIPT_DIR/02b-service-liveness.yaml"
 kubectl apply -f "$SCRIPT_DIR/08-service-executor.yaml"
 
 echo "=== Applying configmaps ==="
 kubectl apply -f "$SCRIPT_DIR/03-configmap.yaml"
 kubectl apply -f "$SCRIPT_DIR/10-configmap-executor-small.yaml"
 kubectl apply -f "$SCRIPT_DIR/11-configmap-executor-large.yaml"
+
+echo "=== Deploying external ZooKeeper ensemble ==="
+kubectl apply -f "$SCRIPT_DIR/09-zookeeper.yaml"
+kubectl rollout status statefulset/dremio-zk -n "$NAMESPACE" --timeout=120s
 
 echo "=== Applying coordinator deployment ==="
 kubectl apply -f "$SCRIPT_DIR/04-coordinator.yaml"

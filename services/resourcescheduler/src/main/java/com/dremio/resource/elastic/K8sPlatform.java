@@ -62,13 +62,16 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
 
   // Idle-reset: resets desiredSmall/desiredLarge to 0 when all activity metrics
   // (jobs.active, maestro.active) have been 0 for IDLE_RESET_THRESHOLD consecutive
-  // polls (5 min). This prevents stale elastic_desired_* metrics from keeping executors
+  // polls (30 min). This prevents stale elastic_desired_* metrics from keeping executors
   // running after a query completes or is cancelled, since ElasticResourceAllocator has
   // no query-completion hook to call scaleExecutors(-N).
-  // The 5-minute window gives executors enough time to register during cold-start
-  // (typically 60–90s) even if jobs.active briefly drops to 0 between planning and
-  // execution. It also accommodates PVC provisioning delays on cloud platforms.
-  private static final int IDLE_RESET_THRESHOLD = 30; // 30 × 10 s = 300 s = 5 min
+  // The 30-minute window accommodates:
+  // - Executor JVM startup (20-60s) and PVC provisioning (60-120s)
+  // - Brief jobs.active=0 drops between query planning and execution start
+  // - Long-running queries (4+ hour dbt MERGE) where the Foreman is active but
+  //   jobs.active can briefly dip during plan compilation phases
+  // - KEDA scale-down stabilization windows
+  private static final int IDLE_RESET_THRESHOLD = 180; // 180 × 10 s = 1800 s = 30 min
   private final AtomicInteger idlePollCount = new AtomicInteger(0);
   // Starts as false so the idle-reset cannot fire until a job is observed.
   // Set to false by armIdleGuard() / scaleDeployment() when a scale-up is requested.
@@ -77,6 +80,15 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   // cold-start window (typically 60–90 s) during which jobs_active=0 even though
   // executors are being provisioned and the coordinator is blocking in waitForExecutors().
   private volatile boolean jobSeenSinceScaleUp = false;
+
+  // Wall-clock backstop: if elastic_desired_* has been non-zero for longer than
+  // MAX_STALE_MS, force-reset to 0 regardless of what the gauges say. This protects
+  // against gauge leaks (e.g., stale entries in MaestroServiceImpl.activeQueryMap)
+  // that prevent the idle-reset countdown from ever starting.
+  // 90 minutes provides a generous window for long-running queries (4+ hour dbt MERGE)
+  // while still recovering from leaked gauges in a reasonable timeframe.
+  private static final long MAX_STALE_MS = TimeUnit.MINUTES.toMillis(90);
+  private volatile long lastScaleUpTime = 0;
   private final ScheduledExecutorService idleResetScheduler =
       Executors.newSingleThreadScheduledExecutor(
           r -> {
@@ -124,6 +136,45 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
    */
   private void checkAndResetIfIdle() {
     try {
+      // Wall-clock backstop: if elastic_desired_* has been non-zero for >45 min,
+      // check jobs.active as ground truth. ForemenWorkManager.externalIdToForeman
+      // is the reliable indicator of whether queries are genuinely running — the
+      // Foreman is removed from the map when it completes (even on failure).
+      // maestro.active can leak (stale activeQueryMap entries when fragment
+      // completion RPCs are lost), so it is NOT used for the backstop decision.
+      // If jobs.active > 0, long-running queries are active — do NOT reset.
+      // If jobs.active == 0, all Foremen have completed and any maestro.active
+      // is stale — force-reset to 0 so KEDA can scale down.
+      boolean desiredNonZero = desiredSmall.get() > 0 || desiredLarge.get() > 0;
+      if (desiredNonZero
+          && lastScaleUpTime > 0
+          && System.currentTimeMillis() - lastScaleUpTime > MAX_STALE_MS) {
+        double jobsActive = getGaugeValue("jobs.active");
+        if (jobsActive > 0.0) {
+          // Foremen are still running — long-running queries are active.
+          // Do NOT reset. Refresh lastScaleUpTime to avoid log spam every 10s.
+          lastScaleUpTime = System.currentTimeMillis();
+          return;
+        }
+        // jobs.active == 0: all Foremen have completed. Any maestro.active > 0
+        // is from leaked activeQueryMap entries (stale gauge). Force-reset.
+        int prevSmall = desiredSmall.getAndSet(0);
+        int prevLarge = desiredLarge.getAndSet(0);
+        double maestroActive = getGaugeValue("maestro.active");
+        logger.warn(
+            "Wall-clock backstop: elastic_desired non-zero for >{}min with jobs.active=0 "
+                + "but maestro.active={}. Stale gauge suspected. "
+                + "Force-resetting (small={}, large={}).",
+            MAX_STALE_MS / 60_000,
+            maestroActive,
+            prevSmall,
+            prevLarge);
+        jobSeenSinceScaleUp = false;
+        idlePollCount.set(0);
+        lastScaleUpTime = 0;
+        return;
+      }
+
       // Use total metrics (jobs.active, maestro.active) which cover all tiers.
       // Tier-specific variants (jobs.active.small, etc.) are subsets of the totals,
       // so checking totals is sufficient for the idle-reset decision.
@@ -280,6 +331,7 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
       // are starting up (jobs_active=0 during the ~60-90s provisioning window).
       if (newReplicas > 0) {
         jobSeenSinceScaleUp = false;
+        lastScaleUpTime = System.currentTimeMillis();
       }
 
       logger.info(
@@ -298,6 +350,7 @@ public class K8sPlatform implements ResourcePlatform, Closeable {
   public void armIdleGuard() {
     jobSeenSinceScaleUp = false;
     idlePollCount.set(0);
+    lastScaleUpTime = System.currentTimeMillis();
   }
 
   @Override

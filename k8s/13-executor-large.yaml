@@ -39,7 +39,7 @@ spec:
     spec:
       containers:
         - name: executor
-          image: ghcr.io/rusha-corp/dremio-oss:2026.07.2
+          image: ghcr.io/rusha-corp/dremio-oss:2026.07.4
           imagePullPolicy: Always
           securityContext:
             runAsUser: 0

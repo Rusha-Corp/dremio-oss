@@ -33,8 +33,8 @@ The executor tiers (small/large) scale from zero based on query demand and scale
 | `00b-coordinator-pvc.yaml` | Coordinator data PVC (Longhorn) |
 | `00c-dist-pvc.yaml` | Shared distribution PVC (Longhorn, ReadWriteMany) |
 | `01-rbac.yaml` | Service accounts, Roles, ClusterRoleBindings |
-| `02-service.yaml` | Headless service for coordinator pod DNS |
-| `02b-executor-service.yaml` | Headless service for executor pod DNS |
+| `02-service.yaml` | Headless service for coordinator pod DNS (includes liveness port 45679) |
+| `02b-service-liveness.yaml` | Headless service for coordinator liveness/metrics endpoint (port 45679, for Prometheus) |
 | `03-configmap.yaml` | Dremio coordinator configuration |
 | `04-coordinator.yaml` | Coordinator deployment |
 | `05-ingress-tcp-flight.yaml` | TCP ingress for Flight SQL |
@@ -68,7 +68,7 @@ KEDA scales executors using native `prometheus` triggers that read metrics publi
 │  K8sPlatform idle-reset thread (every 10s)   │
 │  - reads jobs_active + maestro_active         │
 │    from Micrometer globalRegistry (in-process)│
-│  - after 5 min idle → resets gauges to 0      │
+│  - after 30 min idle → resets gauges to 0     │
 │    (cold-start guard suppresses during         │
 │     executor startup window; see below)       │
 │                                               │
@@ -101,17 +101,17 @@ KEDA scales executors using native `prometheus` triggers that read metrics publi
 
 ### Scale-down path
 
-The coordinator's `checkAndResetIfIdle()` thread (10s poll interval) reads `jobs_active` and `maestro_active` directly from the Micrometer `globalRegistry` (in-process, no HTTP). After 30 consecutive idle polls (5 minutes), it resets `elastic_desired_small` and `elastic_desired_large` to 0.
+The coordinator's `checkAndResetIfIdle()` thread (10s poll interval) reads `jobs_active` and `maestro_active` directly from the Micrometer `globalRegistry` (in-process, no HTTP). After 180 consecutive idle polls (30 minutes), it resets `elastic_desired_small` and `elastic_desired_large` to 0. The 30-minute window accommodates long-running queries (4+ hour dbt MERGE operations) where `jobs_active` can briefly dip to 0 between planning phases.
 
 When both triggers read 0, KEDA becomes INACTIVE and begins its `cooldownPeriod` (600s). After the cooldown, `spec.replicas` is set to 0 and pods terminate gracefully.
 
 ### Cold-start guard
 
-When `scaleDeployment()` is called with `newReplicas > 0`, it sets `jobSeenSinceScaleUp = false`. The idle countdown is suppressed while this flag is false — preventing the 5-minute reset from firing during the executor cold-start window (~60–90s) when `jobs_active=0` even though the coordinator is actively waiting for executors.
+When `scaleDeployment()` is called with `newReplicas > 0`, it sets `jobSeenSinceScaleUp = false`. The idle countdown is suppressed while this flag is false — preventing the 30-minute reset from firing during the executor cold-start window (~60–90s) when `jobs_active=0` even though the coordinator is actively waiting for executors.
 
-The flag is set back to `true` by the idle-reset thread as soon as it sees `jobs_active > 0` for the first time, after which the 5-minute countdown runs normally.
+The flag is set back to `true` by the idle-reset thread as soon as it sees `jobs_active > 0` for the first time, after which the 30-minute countdown runs normally.
 
-**Important:** The `jobSeenSinceScaleUp` flag is the sole guard for the idle-reset countdown. An earlier version also checked `desiredSmall > 0 || desiredLarge > 0`, but this created a deadlock: the reset could only clear the gauges to 0, but the guard prevented the reset whenever they were > 0. The deadlock was fixed in v2026.07.2 by removing the gauge guard and increasing the idle threshold from 60s to 5 minutes.
+**Important:** The `jobSeenSinceScaleUp` flag is the sole guard for the idle-reset countdown. An earlier version also checked `desiredSmall > 0 || desiredLarge > 0`, but this created a deadlock: the reset could only clear the gauges to 0, but the guard prevented the reset whenever they were > 0. The deadlock was fixed in v2026.07.2 by removing the gauge guard. The threshold was subsequently increased from 5 minutes to 30 minutes to protect long-running queries from premature scale-down.
 
 ### Dual triggers per ScaledObject
 
@@ -120,11 +120,9 @@ Each ScaledObject has two `prometheus` triggers. KEDA takes the maximum across a
 | Trigger | Metric | Purpose |
 |---|---|---|
 | Primary | `elastic_desired_small` / `elastic_desired_large` | Drives the desired replica count |
-| Guard | `jobs_active + maestro_active (+ reflections_active for small)` | Keeps executors alive while work is running, even during the 30s idle-reset window |
+| Guard | `clamp_max(jobs_active + maestro_active + reflections_active + reflections_refreshing, 1)` | Keeps executors alive while work is running, even during the 30-min idle-reset window |
 
-### Prometheus scrape configuration
-
-The coordinator liveness endpoint must be reachable from Prometheus. Example scrape job (add to your Prometheus ConfigMap):
+**Note:** The guard expression includes `reflections_active` and `reflections_refreshing` because they are published by Dremio's reflection subsystem. These metrics keep executors alive during reflection refreshes, which can be long-running operations.
 
 ```yaml
 - job_name: dremio-coordinator
@@ -134,7 +132,7 @@ The coordinator liveness endpoint must be reachable from Prometheus. Example scr
         - dremio-coordinator-liveness.dremio:45679
 ```
 
-Replace `dremio-coordinator-liveness.dremio:45679` with the coordinator's liveness service DNS and port for your namespace. The liveness service is defined in `02-service.yaml`.
+Replace `dremio-coordinator-liveness.dremio:45679` with the coordinator's liveness service DNS and port for your namespace. The liveness service is defined in `02b-service-liveness.yaml`.
 
 ## Building the Image
 

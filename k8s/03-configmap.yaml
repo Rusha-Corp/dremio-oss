@@ -42,7 +42,7 @@ data:
     services: {
       coordinator.enabled: true,
       coordinator.master.enabled: true,
-      coordinator.master.embedded-zookeeper.enabled: true,
+      coordinator.master.embedded-zookeeper.enabled: false,
       coordinator.web.port: 9047,
       coordinator.web.auth.type: "internal",
       flight.port: 32010,
@@ -58,3 +58,6 @@ data:
       web-admin.host: "0.0.0.0",
       web-admin.port: 45679
     }
+    # External ZooKeeper ensemble — decouples ZK from coordinator lifecycle
+    # so coordinator rolling updates do not disrupt executor registrations.
+    zookeeper: "dremio-zk-0.dremio-zk.dremio.svc.cluster.local:2181,dremio-zk-1.dremio-zk.dremio.svc.cluster.local:2181,dremio-zk-2.dremio-zk.dremio.svc.cluster.local:2181"

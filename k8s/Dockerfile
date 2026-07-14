@@ -16,13 +16,14 @@ COPY dremio-distribution.tar.gz /tmp/
 RUN tar xfz /tmp/dremio-distribution.tar.gz -C /opt/dremio --strip-components=1 \
     && rm /tmp/dremio-distribution.tar.gz
 
-# Copy fixed JARs (common includes updated dremio-reference.conf)
-COPY dremio-common-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
-COPY dremio-services-execselector-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
-COPY dremio-services-resourcescheduler-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
-COPY dremio-services-telemetry-api-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
-COPY dremio-sabot-kernel-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
-COPY dremio-dac-backend-26.0.5-202509091642240013-f5051a07.jar /opt/dremio/jars/
+# Copy fixed JARs (overlays on top of tarball for modules that changed).
+# The build script stages available JARs into an overlay/ directory.
+# Only files that exist are copied — missing JARs fall through to the
+# tarball's version (which is fine for modules we didn't modify).
+COPY overlay/ /tmp/overlay/
+RUN for f in /tmp/overlay/*.jar; do \
+      [ -f "$f" ] && cp "$f" /opt/dremio/jars/ || true; \
+    done && rm -rf /tmp/overlay
 
 EXPOSE 9047/tcp 31010/tcp 32010/tcp 45678/tcp
 

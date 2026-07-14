@@ -93,7 +93,7 @@ public class ElasticResourceAllocator extends BasicResourceAllocator {
     }
 
     if (resourcePlatform == NoOpResourcePlatform.INSTANCE) {
-      throw new IllegalStateException(
+      throw new ResourceAllocationException(
           "Elastic executor is enabled but no valid platform is configured. "
               + "Please configure services.executor.elastic.kubernetes settings.");
     }

@@ -12,12 +12,12 @@ spec:
     - port: 45678
       targetPort: 45678
       name: rpc
-    - port: 2181
-      targetPort: 2181
-      name: zk
     - port: 32010
       targetPort: 32010
       name: flight
+    - port: 45679
+      targetPort: 45679
+      name: liveness
   selector:
     app: dremio
     role: coordinator

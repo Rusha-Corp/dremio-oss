@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="${GHCR_REPO:-ghcr.io/rusha-corp/dremio-oss}"
-export DREMIO_VERSION="2026.07.2"
+export DREMIO_VERSION="2026.07.4"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARBALL_GLOB="$REPO_ROOT/distribution/server/target/dremio-community-*.tar.gz"
@@ -24,13 +24,24 @@ echo "=== Using tarball: $TARBALL ==="
 rm -f "$SCRIPT_DIR/dremio-distribution.tar.gz"
 cp "$TARBALL" "$SCRIPT_DIR/dremio-distribution.tar.gz"
 
-# 2b. Stage rebuilt JARs (replace stale copies in k8s/)
-# Only the two JARs that changed need restaging; the other four are already in k8s/.
+# 2b. Stage rebuilt JARs into overlay/ directory for Dockerfile.
+# Clean old staged JARs first so only fresh ones are present.
 echo "=== Staging rebuilt JARs ==="
-COMMON_JAR="$(find "$REPO_ROOT/common/legacy/target" -name 'dremio-common-*.jar' ! -name '*-tests.jar' | head -1)"
-RSCHED_JAR="$(find "$REPO_ROOT/services/resourcescheduler/target" -name 'dremio-services-resourcescheduler-*.jar' ! -name '*-tests.jar' | head -1)"
-[ -n "$COMMON_JAR" ] && cp "$COMMON_JAR" "$SCRIPT_DIR/"
-[ -n "$RSCHED_JAR" ] && cp "$RSCHED_JAR" "$SCRIPT_DIR/"
+rm -rf "$SCRIPT_DIR/overlay"
+mkdir -p "$SCRIPT_DIR/overlay"
+COMMON_JAR="$(find "$REPO_ROOT/common/legacy/target" -name 'dremio-common-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
+EXECSEL_JAR="$(find "$REPO_ROOT/services/execselector/target" -name 'dremio-services-execselector-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
+RSCHED_JAR="$(find "$REPO_ROOT/services/resourcescheduler/target" -name 'dremio-services-resourcescheduler-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
+TELEMETRY_JAR="$(find "$REPO_ROOT/services/telemetry-api/target" -name 'dremio-services-telemetry-api-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
+SABOT_JAR="$(find "$REPO_ROOT/sabot/kernel/target" -name 'dremio-sabot-kernel-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
+DAC_BACKEND_JAR="$(find "$REPO_ROOT/dac/backend/target" -name 'dremio-dac-backend-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
+[ -n "$COMMON_JAR" ] && cp "$COMMON_JAR" "$SCRIPT_DIR/overlay/" || true
+[ -n "$EXECSEL_JAR" ] && cp "$EXECSEL_JAR" "$SCRIPT_DIR/overlay/" || true
+[ -n "$RSCHED_JAR" ] && cp "$RSCHED_JAR" "$SCRIPT_DIR/overlay/" || true
+[ -n "$TELEMETRY_JAR" ] && cp "$TELEMETRY_JAR" "$SCRIPT_DIR/overlay/" || true
+[ -n "$SABOT_JAR" ] && cp "$SABOT_JAR" "$SCRIPT_DIR/overlay/" || true
+[ -n "$DAC_BACKEND_JAR" ] && cp "$DAC_BACKEND_JAR" "$SCRIPT_DIR/overlay/" || true
+echo "  Staged $(ls "$SCRIPT_DIR/overlay/"*.jar 2>/dev/null | wc -l) JAR(s)"
 
 # 3. Login to GHCR
 echo "=== Logging in to GHCR ==="
@@ -48,5 +59,6 @@ docker push "${REPO}:${DREMIO_VERSION}"
 docker push "${REPO}:latest"
 
 # 5. Cleanup staged files
-rm "$SCRIPT_DIR/dremio-distribution.tar.gz"
+rm -f "$SCRIPT_DIR/dremio-distribution.tar.gz"
+rm -rf "$SCRIPT_DIR/overlay"
 echo "=== Done. Images pushed: ${REPO}:${DREMIO_VERSION}, ${REPO}:latest ==="

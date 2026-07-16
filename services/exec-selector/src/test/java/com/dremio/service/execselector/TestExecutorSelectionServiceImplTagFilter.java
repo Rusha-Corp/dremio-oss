@@ -171,24 +171,43 @@ public class TestExecutorSelectionServiceImplTagFilter {
   }
 
   @Test
-  public void testApplyTagFilterNoTaggedExecutorsFallsBackToAll() {
-    // All endpoints are untagged, but the queue says LARGE
+  public void testApplyTagFilterLargeQueueNoTaggedThrowsFailFast() {
+    // All endpoints are untagged, but the queue says LARGE.
+    // Fail-fast: throw rather than fall back to all endpoints (prevents OOM on small executors).
     Set<NodeEndpoint> endpoints =
         ImmutableSet.of(newNode("untagged-0", ""), newNode("untagged-1", ""));
     ResourceSchedulingDecisionInfo decision = new ResourceSchedulingDecisionInfo();
     decision.setQueueName("LARGE");
+    try {
+      selectionService.applyTagFilter(endpoints, decision);
+      org.junit.Assert.fail("Expected RuntimeException for LARGE queue with no tagged executors");
+    } catch (RuntimeException e) {
+      assertTrue(e.getMessage().contains("No 'large'-tagged executors found"));
+    }
+  }
+
+  @Test
+  public void testApplyTagFilterSmallQueueNoTaggedFallsBackToAll() {
+    // Small queue with no tagged executors: fall back to all (safe — small queries can run on large).
+    Set<NodeEndpoint> endpoints =
+        ImmutableSet.of(newNode("untagged-0", ""), newNode("untagged-1", ""));
+    ResourceSchedulingDecisionInfo decision = new ResourceSchedulingDecisionInfo();
+    decision.setQueueName("SMALL");
     Set<NodeEndpoint> filtered = selectionService.applyTagFilter(endpoints, decision);
-    // Should fall back to all endpoints rather than returning empty
     assertEquals(endpoints, filtered);
   }
 
   @Test
-  public void testApplyTagFilterEmptyEndpoints() {
+  public void testApplyTagFilterLargeQueueEmptyEndpointsThrows() {
     Set<NodeEndpoint> endpoints = ImmutableSet.of();
     ResourceSchedulingDecisionInfo decision = new ResourceSchedulingDecisionInfo();
     decision.setQueueName("LARGE");
-    Set<NodeEndpoint> filtered = selectionService.applyTagFilter(endpoints, decision);
-    assertTrue(filtered.isEmpty());
+    try {
+      selectionService.applyTagFilter(endpoints, decision);
+      org.junit.Assert.fail("Expected RuntimeException for LARGE queue with no endpoints");
+    } catch (RuntimeException e) {
+      assertTrue(e.getMessage().contains("No 'large'-tagged executors found"));
+    }
   }
 
   // ---- getExecutors integration test with tag filtering ----
@@ -223,8 +242,7 @@ public class TestExecutorSelectionServiceImplTagFilter {
     decision.setQueueName("LARGE");
     ExecutorSelectionContext largeCtx = new ExecutorSelectionContext(decision);
     try (ExecutorSelectionHandle largeHandle = selectionService.getExecutors(2, largeCtx)) {
-      // With LARGE queue filtering, result should be a subset of all executors
-      // (either only large-tagged, or all if fallback triggered)
+      // With LARGE queue filtering, result should only contain large-tagged executors
       assertTrue(
           "Expected at least 1 executor with LARGE context",
           largeHandle.getExecutors().size() >= 1);

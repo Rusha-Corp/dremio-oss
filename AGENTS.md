@@ -30,10 +30,9 @@ This file provides instructions for AI agents (Codex, Jules, Factory Droid, etc.
 
 The elastic scaling code lives under `services/resourcescheduler/src/main/java/com/dremio/resource/elastic/`. Key classes:
 
-- `ResourcePlatform` — interface for platform-agnostic scaling (tier-aware)
-- `K8sPlatform` — Kubernetes implementation (manages two StatefulSets: small and large)
-- `ElasticResourceAllocator` — entry point; classifies queries by cost, calls tier-aware scaling
-- `ElasticAdmissionCalculator` — cost thresholds and tier classification
-- `ResourcePlatformProvider` — DI provider, reads `DremioConfig` constants
+- `ElasticResourceAllocator` — entry point; extends BasicResourceAllocator, overrides `getQueueNameFromSchedulingProperties` to add routingQueue check (single source of truth for tier classification), publishes `elastic_desired_*` Prometheus gauges for KEDA, waits for executors via ZK
+- `ElasticAdmissionCalculator` — calculates required executors from query cost (1/2/3 based on cost bands)
+
+KEDA reads `elastic_desired_small`/`elastic_desired_large` gauges from the coordinator's Prometheus endpoint and scales the StatefulSets. Dremio does not interact with the Kubernetes API directly.
 
 When renaming or removing config keys, update all of: `DremioConfig.java` constants, `dremio-reference.conf` files, k8s configmap, and all documentation under `docs/` and `k8s/README.md`.

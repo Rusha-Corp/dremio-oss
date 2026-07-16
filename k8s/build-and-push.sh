@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="${GHCR_REPO:-ghcr.io/rusha-corp/dremio-oss}"
-export DREMIO_VERSION="2026.07.4"
+export DREMIO_VERSION="2026.07.5"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARBALL_GLOB="$REPO_ROOT/distribution/server/target/dremio-community-*.tar.gz"
@@ -30,7 +30,7 @@ echo "=== Staging rebuilt JARs ==="
 rm -rf "$SCRIPT_DIR/overlay"
 mkdir -p "$SCRIPT_DIR/overlay"
 COMMON_JAR="$(find "$REPO_ROOT/common/legacy/target" -name 'dremio-common-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
-EXECSEL_JAR="$(find "$REPO_ROOT/services/execselector/target" -name 'dremio-services-execselector-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
+EXECSEL_JAR="$(find "$REPO_ROOT/services/exec-selector/target" -name 'dremio-services-execselector-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
 RSCHED_JAR="$(find "$REPO_ROOT/services/resourcescheduler/target" -name 'dremio-services-resourcescheduler-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
 TELEMETRY_JAR="$(find "$REPO_ROOT/services/telemetry-api/target" -name 'dremio-services-telemetry-api-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true
 SABOT_JAR="$(find "$REPO_ROOT/sabot/kernel/target" -name 'dremio-sabot-kernel-*.jar' ! -name '*-tests.jar' 2>/dev/null | head -1)" || true

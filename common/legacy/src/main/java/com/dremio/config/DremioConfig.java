@@ -103,19 +103,12 @@ public class DremioConfig extends NestedConfig {
 
   // Elastic scaling configuration
   public static final String ELASTIC_ENABLED = "services.executor.elastic.enabled";
-  public static final String ELASTIC_MIN_EXECUTORS = "services.executor.elastic.min_executors";
   public static final String ELASTIC_MAX_EXECUTORS_SMALL =
       "services.executor.elastic.max_executors_small";
   public static final String ELASTIC_MAX_EXECUTORS_LARGE =
       "services.executor.elastic.max_executors_large";
   public static final String ELASTIC_SCALE_TIMEOUT =
       "services.executor.elastic.scale_timeout_minutes";
-  public static final String ELASTIC_K8S_NAMESPACE =
-      "services.executor.elastic.kubernetes.namespace";
-  public static final String ELASTIC_K8S_POD_TEMPLATE =
-      "services.executor.elastic.kubernetes.pod_template";
-  public static final String ELASTIC_K8S_POD_TEMPLATE_LARGE =
-      "services.executor.elastic.kubernetes.pod_template_large";
 
   public static final String ELASTIC_SMALL_QUERY_THRESHOLD =
       "services.executor.elastic.small_query_threshold";

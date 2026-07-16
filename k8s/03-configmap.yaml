@@ -48,12 +48,8 @@ data:
       flight.port: 32010,
       executor.enabled: false,
       executor.elastic.enabled: true,
-      executor.elastic.min_executors: 0,
       executor.elastic.max_executors_small: 2,
       executor.elastic.max_executors_large: 3,
-      executor.elastic.kubernetes.namespace: "dremio",
-      executor.elastic.kubernetes.pod_template: "dremio-executor-small",
-      executor.elastic.kubernetes.pod_template_large: "dremio-executor-large",
       executor.elastic.scale_timeout_minutes: 20,
       web-admin.host: "0.0.0.0",
       web-admin.port: 45679

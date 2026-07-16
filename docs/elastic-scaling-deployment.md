@@ -10,15 +10,19 @@ This guide walks through deploying Dremio OSS with KEDA-driven elastic executor 
 ┌──────────────────────────────────────────────┐
 │           Dremio Coordinator                  │
 │  ElasticResourceAllocator                     │
-│  - query arrives → determine tier & delta     │
+│  - query arrives → classify tier via           │
+│    getQueueNameFromSchedulingProperties        │
+│    (routingQueue + cost → QueueType)           │
 │  - publishes elastic_desired_small/large      │
 │    as Prometheus gauges via Micrometer         │
 │    globalRegistry (in-process, no HTTP)       │
+│  - no Kubernetes API interaction              │
 │                                               │
-│  K8sPlatform idle-reset thread (10s poll)    │
+│  ElasticResourceAllocator idle-reset          │
+│  thread (10s poll)                            │
 │  - reads jobs.active, maestro.active from     │
 │    Micrometer globalRegistry (in-process)    │
-│  - after 5 min idle: resets gauges to 0       │
+│  - after 30 min idle: resets gauges to 0      │
 │  - cold-start guard: suppressed while         │
 │    jobSeenSinceScaleUp=false (executor        │
 │    startup window ~60-90s)                   │
@@ -50,9 +54,9 @@ This guide walks through deploying Dremio OSS with KEDA-driven elastic executor 
 
 **Scale-up path:** Query arrives → coordinator computes required executors → publishes `elastic_desired_large=3` via Micrometer gauge → Prometheus scrapes it within 5s → KEDA reads it within 10s → sets `spec.replicas=3` → pods start and register → query executes.
 
-**Scale-down path:** `jobs_active=0` and `maestro_active=0` for 5 minutes → coordinator resets `elastic_desired_*` to 0 → KEDA becomes INACTIVE → after `cooldownPeriod` (600s) → scales to zero.
+**Scale-down path:** `jobs_active=0` and `maestro_active=0` for 30 minutes → coordinator resets `elastic_desired_*` to 0 → KEDA becomes INACTIVE → after `cooldownPeriod` (600s) → scales to zero.
 
-**Cold-start guard:** When `scaleDeployment()` sets `newReplicas > 0`, the `jobSeenSinceScaleUp` flag is set to `false`, suppressing the idle countdown until the first job is seen running (`jobs_active > 0`). This prevents the 5-minute idle-reset from firing during the executor startup window, which would cancel the scale-up before executors become ready.
+**Cold-start guard:** When `publishDesired()` sets `desired > 0`, the `jobSeenSinceScaleUp` flag is set to `false`, suppressing the idle countdown until the first job is seen running (`jobs_active > 0`). This prevents the 30-minute idle-reset from firing during the executor startup window, which would cancel the scale-up before executors become ready.
 
 Each KEDA ScaledObject has two `prometheus` triggers — KEDA takes the maximum:
 - **Primary**: `elastic_desired_small/large` — drives the desired replica count
@@ -76,7 +80,7 @@ Each KEDA ScaledObject has two `prometheus` triggers — KEDA takes the maximum:
 
 | Image | Registry | Notes |
 |---|---|---|
-| Dremio OSS (coordinator + executor) | `ghcr.io/rusha-corp/dremio-oss:2026.07.2` | Same binary; role set by ConfigMap |
+| Dremio OSS (coordinator + executor) | `ghcr.io/rusha-corp/dremio-oss:2026.07.5` | Same binary; role set by ConfigMap |
 
 ---
 
@@ -87,7 +91,7 @@ kubectl apply -f k8s/00-namespace.yaml
 kubectl apply -f k8s/01-rbac.yaml
 ```
 
-The RBAC creates a `dremio-elastic` service account with permission to read/patch StatefulSets in the `dremio` namespace (required by the coordinator's `ElasticResourceAllocator`).
+The RBAC creates a `dremio-elastic` service account. Dremio does not interact with the Kubernetes API directly — KEDA handles StatefulSet scaling. The service account is used for pod identity and any read-only cluster introspection.
 
 ---
 
@@ -146,20 +150,14 @@ services.executor.elastic {
 
   max_executors_small: 4         # small-tier cap
   max_executors_large: 8         # large-tier cap
-
-  kubernetes {
-    namespace: "dremio"
-    pod_template: "dremio-executor-small"
-    pod_template_large: "dremio-executor-large"
-  }
 }
 ```
 
-Tier routing — queries are classified LARGE when the routing queue name contains `"large"` (case-insensitive), otherwise SMALL:
+Tier routing — queries are classified LARGE when the routing queue name contains `"large"` (case-insensitive), otherwise by cost threshold:
 
 ```hocon
-services.executor.elastic.small_query_threshold: 100   # plan cost below this → SMALL
-services.executor.elastic.medium_query_threshold: 1000 # plan cost above this → LARGE
+services.executor.elastic.small_query_threshold: 10000000   # plan cost below this → 1 executor
+services.executor.elastic.medium_query_threshold: 30000000  # plan cost above this → 3 executors
 ```
 
 Apply:
@@ -183,7 +181,7 @@ kubectl wait --for=condition=Ready pod -l role=coordinator -n dremio --timeout=3
 Verify there are no startup errors:
 
 ```bash
-kubectl logs -n dremio -l role=coordinator | grep -E "ERROR|elastic|K8sPlatform"
+kubectl logs -n dremio -l role=coordinator | grep -E "ERROR|elastic"
 ```
 
 ---
@@ -331,13 +329,12 @@ kubectl exec -n <prometheus-namespace> deploy/prometheus -- \
 
 Expected coordinator log when a query triggers scale-up:
 ```
-INFO Scaling dremio-executor-small StatefulSet from 0 to 2 replicas
-INFO Published elastic_desired_small=2 to Prometheus (KEDA will apply via KEDA)
+INFO Elastic scaling: query cost 1.0 classified as LARGE (large), desired 3 executors
 ```
 
 Expected coordinator log when idle-reset fires after query completes:
 ```
-INFO Idle reset: all activity metrics=0 for 300s — resetting elastic_desired_small=2 elastic_desired_large=0 to 0
+INFO Idle reset: all activity metrics=0 for 1800s — resetting elastic_desired_small=2 elastic_desired_large=0 to 0
 ```
 
 ---
@@ -365,7 +362,7 @@ INFO Idle reset: all activity metrics=0 for 300s — resetting elastic_desired_s
 
 - Use NFS or OpenEBS for `ReadWriteMany`.
 - Remove `imagePullSecrets` if pulling from an internal registry with no auth.
-- Ensure the k8s API server is reachable from coordinator pods (the `ElasticResourceAllocator` calls the k8s API to read StatefulSet replica counts).
+- KEDA handles all StatefulSet scaling. Dremio does not interact with the Kubernetes API.
 
 ---
 
@@ -373,13 +370,13 @@ INFO Idle reset: all activity metrics=0 for 300s — resetting elastic_desired_s
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Coordinator crashes: `properties were invalid: ...pod_template_large` | Config key missing from `dremio-reference.conf` | Ensure you're on image `2026.07.2`+ which includes the fix |
+| Coordinator crashes: `properties were invalid: ...pod_template_large` | Config key missing from `dremio-reference.conf` | Ensure you're on image `2026.07.5`+ |
 | `elastic_desired_*` missing from Prometheus | Gauges only appear after first scale event (lazy init) | Submit a test query; check coordinator logs for `elastic-idle-reset` thread |
 | KEDA ScaledObject `ACTIVE: False` even after query | Prometheus not scraping coordinator, or `serverAddress` wrong in ScaledObject | Verify scrape job; check Prometheus targets UI |
 | Executors not scaling up | `elastic_desired_*` not published or KEDA trigger misconfigured | Check `kubectl get scaledobject -n dremio`; verify Prometheus has the metric |
-| `elastic_desired_*` never resets to 0 after query | Idle-reset deadlock — gauges stuck above 0 | Ensure coordinator image is `2026.07.2`+ (see known issue below). Check logs for `Idle reset` messages |
-| Query fails from cold state with timeout | Cold-start guard missing — idle-reset fired during executor startup | Ensure coordinator image is `2026.07.2`+ |
-| Executors stuck running after all queries complete | `elastic_desired_*` gauges never dropped to 0 — idle-reset deadlock | Ensure image is `2026.07.2`+. The v2026.07.1 release had a bug where `desiredSmall/desiredLarge > 0` blocked the idle-reset indefinitely |
+| `elastic_desired_*` never resets to 0 after query | Idle-reset deadlock — gauges stuck above 0 | Ensure coordinator image is `2026.07.5`+. Check logs for `Idle reset` messages |
+| Query fails from cold state with timeout | Cold-start guard missing — idle-reset fired during executor startup | Ensure coordinator image is `2026.07.5`+ |
+| Executors stuck running after all queries complete | `elastic_desired_*` gauges never dropped to 0 — idle-reset deadlock | Ensure image is `2026.07.5`+. The v2026.07.1 release had a bug where `desiredSmall/desiredLarge > 0` blocked the idle-reset indefinitely |
 | Executor evicted for ephemeral storage | Storage limits too low | Set small: 15Gi/30Gi, large: 30Gi/60Gi for request/limit |
 | Executor evicted but disk appears empty | Log flood from Netty DEBUG hex dumps — check `logs usedBytes` in kubelet stats | Add `logback.xml` to executor ConfigMaps with `io.netty` at `WARN` |
 | Orphaned executor PVCs after scale-down | `persistentVolumeClaimRetentionPolicy.whenScaled` is `Retain` | Set to `Delete` in the executor StatefulSet spec |

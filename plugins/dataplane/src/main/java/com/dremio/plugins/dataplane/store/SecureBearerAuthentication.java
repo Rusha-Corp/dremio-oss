@@ -29,7 +29,10 @@ public class SecureBearerAuthentication implements HttpAuthentication {
   private final Supplier<String> accessToken;
 
   public SecureBearerAuthentication(SecretRef accessToken) {
-    this.accessToken = Suppliers.memoizeWithExpiration(accessToken::get, 5, TimeUnit.MINUTES);
+    // Token rotation happens every 6h via the nessie-token-rotator CronJob. After a source update,
+    // the old NessieApiV2 instance may still be used by in-flight queries. A 1-minute TTL ensures
+    // the new token is picked up quickly without excessive secret lookups.
+    this.accessToken = Suppliers.memoizeWithExpiration(accessToken::get, 1, TimeUnit.MINUTES);
   }
 
   @Override

@@ -176,7 +176,6 @@ import com.dremio.resource.ResourceAllocator;
 import com.dremio.resource.RuleBasedEngineSelector;
 import com.dremio.resource.basic.BasicResourceAllocator;
 import com.dremio.resource.elastic.ElasticResourceAllocator;
-import com.dremio.resource.elastic.ResourcePlatformProvider;
 import com.dremio.sabot.exec.CancelQueryContext;
 import com.dremio.sabot.exec.CoordinatorHeapClawBackStrategy;
 import com.dremio.sabot.exec.ExecToCoordTunnelCreator;
@@ -1225,24 +1224,16 @@ public class DACDaemonModule implements DACModule {
           ProvisioningService.class, createProvisioningService(registry, isCoordinator, isMaster));
     }
 
-    // Bind ResourcePlatformProvider for elastic scaling.
-    // The Provider<ResourcePlatform> is used by ElasticResourceAllocator to
-    // lazily obtain the platform (NoOp when disabled, K8sPlatform when enabled).
-    ResourcePlatformProvider resourcePlatformProvider =
-        new ResourcePlatformProvider(config, registry.provider(ClusterCoordinator.class));
-    registry.bind(ResourcePlatformProvider.class, resourcePlatformProvider);
-
     // Check if elastic scaling is enabled
     boolean elasticEnabled = config.getBoolean(DremioConfig.ELASTIC_ENABLED);
 
     if (elasticEnabled) {
-      // Use ElasticResourceAllocator for elastic scaling
+      // Use ElasticResourceAllocator for elastic scaling (publishes metrics for KEDA)
       registry.bind(
           ResourceAllocator.class,
           new ElasticResourceAllocator(
               registry.provider(ClusterCoordinator.class),
               registry.provider(GroupResourceInformation.class),
-              () -> resourcePlatformProvider.get(),
               config));
     } else {
       // Use BasicResourceAllocator for standard operation

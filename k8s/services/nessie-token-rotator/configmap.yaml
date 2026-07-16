@@ -13,3 +13,11 @@ data:
   DREMIO_USERNAME: "emmanuel.davidson"
   NESSIE_ENDPOINT: "https://nessie.tierravivaai.net/api/v2"
   TOKEN_REFRESH_MARGIN: "300"
+  SOURCE_CACHE_PATH: "/tmp/nessie_source_cache.json"
+  SKIP_IF_VALID: "true"
+  # Storage config for bootstrap (minimal payload when no cache exists)
+  NESSIE_SOURCE_ENDPOINT: "https://nessie.tierravivaai.net/api/v2"
+  STORAGE_PROVIDER_TYPE: "AWS"
+  AWS_ROOT_PATH: "/"
+  CREDENTIAL_TYPE: "ACCESS_KEY"
+  AWS_SECURE_CONNECTION: "true"

@@ -202,7 +202,6 @@ ${errorprone.module.args}
     <junit4.version>4.13.2</junit4.version>
     <junit5.version>5.10.3</junit5.version>
     <mockito.version>5.15.2</mockito.version>
-    <fabric8.kubernetes-client.version>6.0.0</fabric8.kubernetes-client.version>
     <logback.version>1.2.13</logback.version>
     <metrics.version>4.1.19</metrics.version>
     <mariadb.connector.version>3.0.8</mariadb.connector.version>
@@ -1029,11 +1028,6 @@ ${errorprone.module.args}
         <groupId>joda-time</groupId>
         <artifactId>joda-time</artifactId>
         <version>2.12.5</version>
-      </dependency>
-      <dependency>
-        <groupId>io.fabric8</groupId>
-        <artifactId>kubernetes-client</artifactId>
-        <version>${fabric8.kubernetes-client.version}</version>
       </dependency>
       <dependency>
         <groupId>net.hydromatic</groupId>

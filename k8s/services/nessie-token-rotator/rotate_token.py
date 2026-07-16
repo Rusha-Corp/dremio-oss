@@ -9,6 +9,8 @@ catalog never falls into an unauthenticated state.
 Uses client_credentials grant type for service-to-service authentication.
 """
 
+import base64
+import json
 import logging
 import os
 import sys
@@ -36,6 +38,23 @@ OAUTH2_SCOPE = os.environ.get("OAUTH2_SCOPE", "")
 TOKEN_REFRESH_MARGIN = int(os.environ.get("TOKEN_REFRESH_MARGIN", "300"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
 RETRY_DELAY = int(os.environ.get("RETRY_DELAY", "5"))
+
+# Path to cache the last-known source config so we can update the token even
+# when the source is unhealthy (deadlock recovery).
+SOURCE_CACHE_PATH = os.environ.get("SOURCE_CACHE_PATH", "/tmp/nessie_source_cache.json")
+# When true, skip rotation if the current token is still valid and has more
+# than TOKEN_REFRESH_MARGIN seconds remaining. Set to "false" to force rotation.
+SKIP_IF_VALID = os.environ.get("SKIP_IF_VALID", "true").lower() == "true"
+
+# Storage configuration for constructing a minimal source payload when no
+# cache is available (first-deployment bootstrap scenario).
+NESSIE_SOURCE_ENDPOINT = os.environ.get("NESSIE_SOURCE_ENDPOINT", NESSIE_ENDPOINT.rstrip("/api/v2").rstrip("/"))
+STORAGE_PROVIDER_TYPE = os.environ.get("STORAGE_PROVIDER_TYPE", "AWS")
+AWS_ROOT_PATH = os.environ.get("AWS_ROOT_PATH", "/")
+CREDENTIAL_TYPE = os.environ.get("CREDENTIAL_TYPE", "ACCESS_KEY")
+AWS_ACCESS_KEY = os.environ.get("AWS_ACCESS_KEY", "")
+AWS_ACCESS_SECRET = os.environ.get("AWS_ACCESS_SECRET", "")
+AWS_SECURE_CONNECTION = os.environ.get("AWS_SECURE_CONNECTION", "true")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -199,8 +218,13 @@ class DremioClient:
         Dremio's Source.toSourceConfig() calls getMetadataPolicy().toMetadataPolicy()
         which throws NullPointerException if metadataPolicy is missing.
 
-        If the PUT fails, attempts to roll back to the previous config
-        to avoid leaving the source in a broken state.
+        Handles HTTP 409 (ConcurrentModificationException) when the tag in the
+        payload is stale. On 409: re-fetches the source config to get a fresh
+        tag and retries the PUT once. If re-fetch also fails, retries with
+        tag=None (forces the create path, which replaces the source config).
+
+        If the PUT ultimately fails, attempts to roll back to the previous
+        config to avoid leaving the source in a broken state.
         """
         config = dict(source.get("config", {}))  # shallow copy
         old_config = dict(config)  # snapshot for rollback
@@ -215,30 +239,98 @@ class DremioClient:
         source_id = source["id"]
         url = f"{self.base_url}/api/v3/catalog/{source_id}"
         resp = self.session.put(url, json=payload)
+
+        # Handle 409: stale tag from cached config
+        if resp.status_code == 409:
+            logger.warning(
+                "PUT returned 409 (stale tag) for source '%s' — "
+                "attempting re-fetch and retry",
+                source.get("name", source_id),
+            )
+            fresh_source = self.get_source(source.get("name", NESSIE_SOURCE_NAME))
+            if fresh_source is not None:
+                fresh_config = dict(fresh_source.get("config", {}))
+                fresh_config["nessieAccessToken"] = new_token
+                fresh_config.pop("propertyList", None)
+                retry_payload = self._build_source_payload(fresh_source, fresh_config)
+                retry_url = f"{self.base_url}/api/v3/catalog/{fresh_source['id']}"
+                resp = self.session.put(retry_url, json=retry_payload)
+                if resp.status_code == 200:
+                    result = resp.json()
+                    logger.info(
+                        "Updated source '%s' with fresh token (recovered from 409 via re-fetch)",
+                        result["name"],
+                    )
+                    return result
+                logger.error(
+                    "Retry PUT after re-fetch failed: status=%d body=%s",
+                    resp.status_code, resp.text[:500],
+                )
+            else:
+                logger.warning(
+                    "Re-fetch failed for source '%s' — retrying PUT with tag=None",
+                    source.get("name", source_id),
+                )
+                retry_payload = dict(payload)
+                retry_payload["tag"] = None
+                resp = self.session.put(url, json=retry_payload)
+                if resp.status_code == 200:
+                    result = resp.json()
+                    logger.info(
+                        "Updated source '%s' with fresh token (recovered from 409 via tag=None)",
+                        result["name"],
+                    )
+                    return result
+                logger.error(
+                    "Retry PUT with tag=None failed: status=%d body=%s",
+                    resp.status_code, resp.text[:500],
+                )
+
         if resp.status_code != 200:
             logger.error(
                 "Update source failed: status=%d body=%s",
                 resp.status_code, resp.text[:500],
             )
             # Attempt rollback to preserve the previous working config
-            logger.warning("Attempting rollback to previous config for source '%s'...", source["name"])
+            logger.warning("Attempting rollback to previous config for source '%s'...", source.get("name", source_id))
             old_config.pop("propertyList", None)
             rollback_payload = self._build_source_payload(source, old_config)
             rollback_payload["tag"] = old_tag
             try:
                 rb_resp = self.session.put(url, json=rollback_payload)
                 if rb_resp.status_code == 200:
-                    logger.info("Rollback succeeded — source '%s' restored to previous config", source["name"])
+                    logger.info("Rollback succeeded — source '%s' restored to previous config", source.get("name", source_id))
                 else:
                     logger.error(
                         "Rollback FAILED for source '%s': status=%d body=%s",
-                        source["name"], rb_resp.status_code, rb_resp.text[:200],
+                        source.get("name", source_id), rb_resp.status_code, rb_resp.text[:200],
                     )
             except Exception as rb_exc:
-                logger.error("Rollback raised exception for source '%s': %s", source["name"], rb_exc)
+                logger.error("Rollback raised exception for source '%s': %s", source.get("name", source_id), rb_exc)
             resp.raise_for_status()
         result = resp.json()
         logger.info("Updated source '%s' with fresh token", result["name"])
+        return result
+
+    def create_source_token(self, source: dict) -> dict:
+        """Create a new source via POST (bootstrap with no existing source ID).
+
+        Used when no cache exists and the source must be recreated from
+        scratch. Sends the minimal source payload via POST /api/v3/catalog.
+        """
+        url = f"{self.base_url}/api/v3/catalog"
+        # Remove read-only fields that Dremio doesn't accept on POST
+        payload = dict(source)
+        payload.pop("propertyList", None)
+        resp = self.session.post(url, json=payload)
+        if resp.status_code != 200:
+            logger.error(
+                "Create source (bootstrap) failed: status=%d body=%s",
+                resp.status_code, resp.text[:500],
+            )
+            resp.raise_for_status()
+        result = resp.json()
+        logger.info("Created source '%s' via bootstrap POST", result.get("name"))
         return result
 
     def verify_source_token(self, source_id: str, new_token: str, nessie_endpoint: str) -> bool:
@@ -348,12 +440,183 @@ def validate_token_against_nessie(token: str, nessie_endpoint: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Source config cache — for deadlock recovery
+# ---------------------------------------------------------------------------
+def save_source_cache(source: dict) -> None:
+    """Persist a sanitized copy of the source config to a local file.
+
+    The nessieAccessToken is stripped because we don't need the old token
+    in the cache; we'll set the new one when we use the cache for recovery.
+    """
+    cache = dict(source)
+    cache_config = dict(cache.get("config", {}))
+    cache_config.pop("nessieAccessToken", None)
+    cache["config"] = cache_config
+    try:
+        with open(SOURCE_CACHE_PATH, "w") as f:
+            json.dump(cache, f)
+        logger.info("Saved source config cache to %s", SOURCE_CACHE_PATH)
+    except OSError as e:
+        logger.warning("Failed to save source config cache: %s", e)
+
+
+def load_source_cache() -> dict | None:
+    """Load the cached source config, or None if the cache doesn't exist."""
+    try:
+        with open(SOURCE_CACHE_PATH, "r") as f:
+            cache = json.load(f)
+        logger.info("Loaded source config cache from %s", SOURCE_CACHE_PATH)
+        return cache
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Failed to load source config cache: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Minimal payload — for first-deployment bootstrap (no cache available)
+# ---------------------------------------------------------------------------
+def build_minimal_source_payload(source_name: str, new_token: str) -> dict:
+    """Construct a minimal source config when no cache exists.
+
+    This is used when the source is unhealthy AND no cached config is
+    available (first deployment or cache wiped). The payload includes the
+    required fields for Dremio's Source.toSourceConfig() to avoid NPEs.
+
+    The tag is set to None so Dremio treats this as a create/replace,
+    bypassing optimistic concurrency checks.
+    """
+    config = {
+        "nessieEndpoint": NESSIE_SOURCE_ENDPOINT,
+        "nessieAuthType": "BEARER",
+        "nessieAccessToken": new_token,
+        "storageProviderType": STORAGE_PROVIDER_TYPE,
+        "awsRootPath": AWS_ROOT_PATH,
+        "credentialType": CREDENTIAL_TYPE,
+        "secure": AWS_SECURE_CONNECTION.lower() == "true",
+    }
+
+    if STORAGE_PROVIDER_TYPE == "AWS" and CREDENTIAL_TYPE == "ACCESS_KEY":
+        config["awsAccessKey"] = AWS_ACCESS_KEY
+        config["awsAccessSecret"] = AWS_ACCESS_SECRET
+
+    return {
+        "id": None,
+        "tag": None,
+        "type": "NESSIE",
+        "name": source_name,
+        "config": config,
+        "metadataPolicy": {
+            "datasetRefreshMode": "PERIODIC",
+            "datasetRefreshPeriodMs": 3600000,
+            "datasetExpireAfterMs": 604800000,
+            "datasetAuthTTLMs": 60000,
+            "deleteUnavailableDatasets": True,
+        },
+        "accelerationGracePeriodMs": 9600000,
+        "accelerationRefreshPeriodMs": 9600000,
+        "accelerationActivePolicyType": "PERIODIC",
+        "accelerationNeverExpire": False,
+        "accelerationNeverRefresh": False,
+        "allowCrossSourceSelection": False,
+        "disableMetadataValidityCheck": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# JWT decoding — for idempotent rotation pre-check
+# ---------------------------------------------------------------------------
+def decode_jwt_expiry(token: str) -> int | None:
+    """Decode the 'exp' claim from a JWT token.
+
+    Returns the expiry as a Unix timestamp, or None if the token is not
+    a valid JWT.
+    """
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        # JWT base64url payload is parts[1]; pad to 4-byte boundary
+        payload_b64 = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        return int(payload.get("exp", 0)) or None
+    except Exception:
+        return None
+
+
+def should_rotate() -> bool:
+    """Check whether rotation is needed by testing the current token.
+
+    If SKIP_IF_VALID is disabled, always returns True.
+    If NESSIE_ENDPOINT is not set, always returns True (can't verify).
+    Otherwise, tests the current token (from cache or by querying Nessie)
+    and returns False if it's still valid with sufficient remaining time.
+    """
+    if not SKIP_IF_VALID:
+        logger.info("SKIP_IF_VALID is false — forcing rotation")
+        return True
+
+    if not NESSIE_ENDPOINT:
+        logger.info("NESSIE_ENDPOINT not set — cannot pre-check, proceeding with rotation")
+        return True
+
+    # Try to get the current token from the source cache
+    cache = load_source_cache()
+    if cache is None:
+        logger.info("No source cache available — proceeding with rotation")
+        return True
+
+    current_token = cache.get("config", {}).get("nessieAccessToken")
+    if not current_token:
+        logger.info("No current token in cache — proceeding with rotation")
+        return True
+
+    # First try JWT expiry check
+    exp = decode_jwt_expiry(current_token)
+    if exp is not None:
+        now = int(time.time())
+        remaining = exp - now
+        if remaining > TOKEN_REFRESH_MARGIN:
+            logger.info(
+                "Current token still valid (expires in %ds, margin=%ds) — skipping rotation",
+                remaining, TOKEN_REFRESH_MARGIN,
+            )
+            return False
+        logger.info("Current token expires in %ds (within margin) — rotation needed", remaining)
+        return True
+
+    # JWT decode failed; validate against Nessie API as fallback
+    url = NESSIE_ENDPOINT.rstrip("/")
+    if not url.endswith("/trees"):
+        url = url + "/trees"
+    try:
+        resp = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {current_token}"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            logger.info("Current token is still valid (Nessie API returned 200) — skipping rotation")
+            return False
+        logger.info("Current token rejected by Nessie (HTTP %d) — rotation needed", resp.status_code)
+        return True
+    except requests.exceptions.RequestException as e:
+        logger.warning("Could not verify current token against Nessie (%s) — proceeding with rotation", e)
+        return True
+
+
+# ---------------------------------------------------------------------------
 # Main rotation logic
 # ---------------------------------------------------------------------------
 @retry(max_attempts=MAX_RETRIES, delay=RETRY_DELAY, exceptions=(requests.exceptions.RequestException, RuntimeError))
 def rotate_token() -> None:
     """Fetch a fresh OAuth2 token and update the Dremio Nessie source."""
     logger.info("Starting token rotation for source '%s'", NESSIE_SOURCE_NAME)
+
+    # 0. Idempotent pre-check: skip rotation if token is still valid
+    if not should_rotate():
+        return
 
     # 1. Fetch a new bearer token from Cognito
     new_token, expires_in = fetch_oauth2_token(
@@ -373,24 +636,46 @@ def rotate_token() -> None:
 
     # 4. Get current source config (with by-path fallback)
     source = client.get_source(NESSIE_SOURCE_NAME)
-    if source is None:
+
+    if source is not None:
+        # Source is healthy — save config for future deadlock recovery
+        save_source_cache(source)
+    else:
+        # Source is unhealthy — try to recover using cached config
         logger.warning(
             "Could not fetch source '%s' — it may be unhealthy. "
-            "Skipping update to preserve existing token. "
-            "Will retry on next scheduled run.",
+            "Attempting recovery from cached source config.",
             NESSIE_SOURCE_NAME,
         )
-        return
+        source = load_source_cache()
+        if source is not None:
+            logger.info("Recovering using cached source config")
+        else:
+            # No cache available — construct a minimal payload for bootstrap
+            logger.warning(
+                "No cached source config available for source '%s'. "
+                "Constructing minimal payload for bootstrap.",
+                NESSIE_SOURCE_NAME,
+            )
+            source = build_minimal_source_payload(NESSIE_SOURCE_NAME, new_token)
 
-    # 5. Update only the nessieAccessToken using a minimal payload
-    client.update_source_token(source, new_token)
+    # 5. Update or create the nessieAccessToken
+    if source.get("id") is None:
+        # Bootstrap: no existing source ID, create via POST
+        source = client.create_source_token(source)
+    else:
+        client.update_source_token(source, new_token)
 
     # 6. Verify the token was stored by validating against the Nessie API
     source_id = source["id"]
     if not client.verify_source_token(source_id, new_token, NESSIE_ENDPOINT):
         raise RuntimeError("Token verification failed after update")
 
-    # 7. Log when the next rotation should happen
+    # 7. Update the cache with the new token for future pre-checks
+    source["config"]["nessieAccessToken"] = new_token
+    save_source_cache(source)
+
+    # 8. Log when the next rotation should happen
     next_rotation = expires_in - TOKEN_REFRESH_MARGIN
     if next_rotation < 60:
         next_rotation = 60
@@ -406,7 +691,7 @@ def main() -> None:
         rotate_token()
     except Exception:
         logger.error("Token rotation failed:\n%s", traceback.format_exc())
-        sys.exit(0)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

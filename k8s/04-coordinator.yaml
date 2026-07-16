@@ -42,6 +42,8 @@ spec:
             - |
               mkdir -p /opt/dremio/data/security
               chmod -R go-rwx /opt/dremio/data
+              chmod 700 /opt/dremio/data/security
+              chmod 600 /opt/dremio/data/security/* 2>/dev/null || true
           securityContext:
             runAsUser: 0
           volumeMounts:
@@ -49,7 +51,7 @@ spec:
               mountPath: /opt/dremio/data
       containers:
         - name: coordinator
-          image: ghcr.io/rusha-corp/dremio-oss:2026.07.4
+          image: ghcr.io/rusha-corp/dremio-oss:2026.07.5
           imagePullPolicy: Always
           securityContext:
             runAsUser: 0
@@ -82,6 +84,20 @@ spec:
             # G1GC tuning for 8 GB heap: larger regions, earlier marking, reserve
             - name: DREMIO_GC_OPTS
               value: "-XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:G1HeapRegionSize=8m -XX:InitiatingHeapOccupancyPercent=30 -XX:G1ReservePercent=15"
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - sleep 120
+          readinessProbe:
+            httpGet:
+              path: /apiv2/login
+              port: 9047
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 10
           resources:
             requests:
               memory: "14Gi"

@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
         - name: executor
-          image: ghcr.io/rusha-corp/dremio-oss:2026.07.4
+          image: ghcr.io/rusha-corp/dremio-oss:2026.07.5
           imagePullPolicy: Always
           env:
             - name: DREMIO_CONF_DIR
@@ -47,11 +47,11 @@ spec:
             # Do NOT use DREMIO_JAVA_OPTS for -Xmx; the dremio launcher resets
             # DREMIO_JAVA_OPTS and re-appends -Xmx/-XX:MaxDirectMemorySize from
             # DREMIO_MAX_HEAP_MEMORY_SIZE_MB / DREMIO_MAX_DIRECT_MEMORY_SIZE_MB.
-            # t3a.xlarge split: 4 GB heap / 11 GB direct = 15 GB JVM, 1 GB for OS.
+            # t3a.xlarge split: 4 GB heap / 14 GB direct = 18 GB JVM, 2 GB for OS.
             - name: DREMIO_MAX_HEAP_MEMORY_SIZE_MB
               value: "4096"
             - name: DREMIO_MAX_DIRECT_MEMORY_SIZE_MB
-              value: "11264"
+              value: "14336"
           lifecycle:
             preStop:
               exec:
@@ -79,11 +79,11 @@ spec:
             limits:
               cpu: "4"
               ephemeral-storage: 20Gi
-              memory: 15Gi
+              memory: 20Gi
             requests:
               cpu: "4"
               ephemeral-storage: 5Gi
-              memory: 15Gi
+              memory: 20Gi
           securityContext:
             runAsGroup: 0
             runAsUser: 0

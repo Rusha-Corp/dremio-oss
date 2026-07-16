@@ -12,16 +12,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods", "configmaps", "services"]
-    verbs: ["create", "delete", "list", "get", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets"]
-    verbs: ["create", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments/scale", "statefulsets/scale"]
-    verbs: ["get", "patch", "update"]
-  - apiGroups: ["autoscaling"]
-    resources: ["horizontalpodautoscalers"]
-    verbs: ["create", "get", "list", "patch", "update", "watch"]
+    verbs: ["list", "get", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -32,30 +23,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: dremio-elastic-role
-subjects:
-  - kind: ServiceAccount
-    name: dremio-elastic
-    namespace: dremio
----
-# ClusterRole for dremio-elastic: Fabric8 in-cluster client needs to list/get
-# namespaces at the cluster scope during initialization (API discovery).
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: dremio-elastic-namespace-reader
-rules:
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "list"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: dremio-elastic-namespace-reader-binding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: dremio-elastic-namespace-reader
 subjects:
   - kind: ServiceAccount
     name: dremio-elastic

@@ -4,8 +4,9 @@ metadata:
   name: nessie-token-rotator
   namespace: dremio
 spec:
-  # Run once daily at midnight UTC. Cognito token TTL is 24h so daily rotation is sufficient.
-  schedule: "0 0 * * *"
+  # Run every 6 hours. Cognito token TTL is 24h, giving 4 retry windows per day.
+  # If one run fails, the next run has another chance before the token expires.
+  schedule: "0 */6 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

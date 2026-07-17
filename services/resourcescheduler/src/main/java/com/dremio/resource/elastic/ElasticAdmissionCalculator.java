@@ -19,8 +19,9 @@ package com.dremio.resource.elastic;
  * Admission calculator for elastic executor scaling.
  *
  * <p>Calculates the number of executors a query needs based on its estimated cost. Tier
- * classification is handled by {@code ElasticResourceAllocator.getQueueNameFromSchedulingProperties}
- * which uses {@code QueueType} as the single source of truth.
+ * classification is handled by {@code
+ * ElasticResourceAllocator.getQueueNameFromSchedulingProperties} which uses {@code QueueType} as
+ * the single source of truth.
  */
 public class ElasticAdmissionCalculator {
 

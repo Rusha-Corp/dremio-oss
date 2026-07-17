@@ -61,8 +61,7 @@ public class TestExecutorSelectionServiceImplTagFilter {
     optionManager = mock(OptionManager.class);
     when(optionManager.getOption(eq(ExecutorSelectionService.EXECUTOR_SELECTION_TYPE)))
         .thenReturn("default");
-    when(optionManager.getOption(eq(ExecutorSetService.DREMIO_VERSION_CHECK)))
-        .thenReturn(true);
+    when(optionManager.getOption(eq(ExecutorSetService.DREMIO_VERSION_CHECK))).thenReturn(true);
 
     final ExecutorSelectorFactory executorSelectorFactory = new TagAwareSelectorFactory();
     executorSelectorProvider = new ExecutorSelectorProvider();
@@ -117,9 +116,7 @@ public class TestExecutorSelectionServiceImplTagFilter {
   public void testApplyTagFilterSmallQueueReturnsOnlySmallTagged() {
     Set<NodeEndpoint> endpoints =
         ImmutableSet.of(
-            newNode("small-0", "small"),
-            newNode("large-0", "large"),
-            newNode("large-1", "large"));
+            newNode("small-0", "small"), newNode("large-0", "large"), newNode("large-1", "large"));
     ResourceSchedulingDecisionInfo decision = new ResourceSchedulingDecisionInfo();
     decision.setQueueName("SMALL");
     Set<NodeEndpoint> filtered = selectionService.applyTagFilter(endpoints, decision);
@@ -188,7 +185,8 @@ public class TestExecutorSelectionServiceImplTagFilter {
 
   @Test
   public void testApplyTagFilterSmallQueueNoTaggedFallsBackToAll() {
-    // Small queue with no tagged executors: fall back to all (safe — small queries can run on large).
+    // Small queue with no tagged executors: fall back to all (safe — small queries can run on
+    // large).
     Set<NodeEndpoint> endpoints =
         ImmutableSet.of(newNode("untagged-0", ""), newNode("untagged-1", ""));
     ResourceSchedulingDecisionInfo decision = new ResourceSchedulingDecisionInfo();
@@ -233,8 +231,7 @@ public class TestExecutorSelectionServiceImplTagFilter {
     try (ExecutorSelectionHandle nullHandle = selectionService.getExecutors(4, nullCtx)) {
       // All 4 executors should be present when no filtering is applied
       assertTrue(
-          "Expected at least 4 executors with null context",
-          nullHandle.getExecutors().size() >= 4);
+          "Expected at least 4 executors with null context", nullHandle.getExecutors().size() >= 4);
     }
 
     // Second: LARGE context should apply tag filtering
@@ -268,7 +265,8 @@ public class TestExecutorSelectionServiceImplTagFilter {
    */
   private static final class TagAwareSelectorFactory implements ExecutorSelectorFactory {
     @Override
-    public ExecutorSelector createExecutorSelector(String selectorType, ReentrantReadWriteLock rwLock) {
+    public ExecutorSelector createExecutorSelector(
+        String selectorType, ReentrantReadWriteLock rwLock) {
       return new TagAwareSelector(selectorType);
     }
   }

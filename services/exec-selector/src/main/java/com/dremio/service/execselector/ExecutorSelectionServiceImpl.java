@@ -234,7 +234,9 @@ public class ExecutorSelectionServiceImpl implements ExecutorSelectionService {
     if ("LARGE".equals(queueName) || "REFLECTION_LARGE".equals(queueName)) {
       return "large";
     }
-    if ("SMALL".equals(queueName) || "REFLECTION_SMALL".equals(queueName) || "LOW_COST".equals(queueName)) {
+    if ("SMALL".equals(queueName)
+        || "REFLECTION_SMALL".equals(queueName)
+        || "LOW_COST".equals(queueName)) {
       return "small";
     }
     return null;

@@ -16,7 +16,6 @@
 package com.dremio.resource.elastic;
 
 import com.dremio.config.DremioConfig;
-import com.dremio.exec.proto.CoordinationProtos.NodeEndpoint;
 import com.dremio.exec.proto.UserBitShared;
 import com.dremio.resource.GroupResourceInformation;
 import com.dremio.resource.ResourceSchedulingProperties;
@@ -44,10 +43,9 @@ import org.slf4j.LoggerFactory;
 /**
  * Elastic Resource Allocator that scales executors based on query requirements.
  *
- * <p>This class extends BasicResourceAllocator to add elastic scaling via KEDA. It publishes
- * {@code elastic_desired_small} and {@code elastic_desired_large} Prometheus gauges that KEDA
- * reads to scale the corresponding StatefulSets. It does not directly interact with the Kubernetes
- * API.
+ * <p>This class extends BasicResourceAllocator to add elastic scaling via KEDA. It publishes {@code
+ * elastic_desired_small} and {@code elastic_desired_large} Prometheus gauges that KEDA reads to
+ * scale the corresponding StatefulSets. It does not directly interact with the Kubernetes API.
  *
  * <p>The single source of truth for tier classification is the overridden {@link
  * #getQueueNameFromSchedulingProperties}, which adds a {@code routingQueue} check on top of the

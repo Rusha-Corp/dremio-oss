@@ -88,27 +88,23 @@ public class ElasticResourceAllocatorTest {
   @Test
   public void testLargeQueueOverridesLowCost() {
     ElasticResourceAllocator allocator =
-        new ElasticResourceAllocator(
-            clusterCoordinatorProvider, groupResourceInfoProvider, config);
+        new ElasticResourceAllocator(clusterCoordinatorProvider, groupResourceInfoProvider, config);
     ResourceSchedulingProperties props = new ResourceSchedulingProperties();
     props.setQueryCost(100.0);
     props.setRoutingQueue("query.large");
     assertEquals(
-        QueueType.LARGE,
-        allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
+        QueueType.LARGE, allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
   }
 
   @Test
   public void testLargeQueueCaseInsensitive() {
     ElasticResourceAllocator allocator =
-        new ElasticResourceAllocator(
-            clusterCoordinatorProvider, groupResourceInfoProvider, config);
+        new ElasticResourceAllocator(clusterCoordinatorProvider, groupResourceInfoProvider, config);
     ResourceSchedulingProperties props = new ResourceSchedulingProperties();
     props.setQueryCost(100.0);
     props.setRoutingQueue("WS.LARGE");
     assertEquals(
-        QueueType.LARGE,
-        allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
+        QueueType.LARGE, allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
   }
 
   // ---- Tier classification: cost-based fallback when no routingQueue ----
@@ -116,38 +112,32 @@ public class ElasticResourceAllocatorTest {
   @Test
   public void testLowCostWithoutRoutingQueueIsSmall() {
     ElasticResourceAllocator allocator =
-        new ElasticResourceAllocator(
-            clusterCoordinatorProvider, groupResourceInfoProvider, config);
+        new ElasticResourceAllocator(clusterCoordinatorProvider, groupResourceInfoProvider, config);
     ResourceSchedulingProperties props = new ResourceSchedulingProperties();
     props.setQueryCost(1_000_000.0);
     assertEquals(
-        QueueType.SMALL,
-        allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
+        QueueType.SMALL, allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
   }
 
   @Test
   public void testHighCostWithoutRoutingQueueIsLarge() {
     ElasticResourceAllocator allocator =
-        new ElasticResourceAllocator(
-            clusterCoordinatorProvider, groupResourceInfoProvider, config);
+        new ElasticResourceAllocator(clusterCoordinatorProvider, groupResourceInfoProvider, config);
     ResourceSchedulingProperties props = new ResourceSchedulingProperties();
     props.setQueryCost(50_000_000.0);
     assertEquals(
-        QueueType.LARGE,
-        allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
+        QueueType.LARGE, allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
   }
 
   @Test
   public void testCostAtThresholdIsSmall() {
     // cost == threshold should be SMALL (cost > threshold is LARGE)
     ElasticResourceAllocator allocator =
-        new ElasticResourceAllocator(
-            clusterCoordinatorProvider, groupResourceInfoProvider, config);
+        new ElasticResourceAllocator(clusterCoordinatorProvider, groupResourceInfoProvider, config);
     ResourceSchedulingProperties props = new ResourceSchedulingProperties();
     props.setQueryCost(30_000_000.0);
     assertEquals(
-        QueueType.SMALL,
-        allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
+        QueueType.SMALL, allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
   }
 
   // ---- Tier classification: routingQueue without "large" falls back to cost ----
@@ -155,14 +145,12 @@ public class ElasticResourceAllocatorTest {
   @Test
   public void testSmallQueueNameFallsBackToCost() {
     ElasticResourceAllocator allocator =
-        new ElasticResourceAllocator(
-            clusterCoordinatorProvider, groupResourceInfoProvider, config);
+        new ElasticResourceAllocator(clusterCoordinatorProvider, groupResourceInfoProvider, config);
     ResourceSchedulingProperties props = new ResourceSchedulingProperties();
     props.setQueryCost(1_000_000.0);
     props.setRoutingQueue("query.small");
     assertEquals(
-        QueueType.SMALL,
-        allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
+        QueueType.SMALL, allocator.getQueueNameFromSchedulingProperties(mockContext(), props));
   }
 
   // ---- Required executors (from ElasticAdmissionCalculator) ----

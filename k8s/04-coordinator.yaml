@@ -92,8 +92,7 @@ spec:
                   - -c
                   - sleep 120
           readinessProbe:
-            httpGet:
-              path: /apiv2/login
+            tcpSocket:
               port: 9047
             initialDelaySeconds: 30
             periodSeconds: 10
